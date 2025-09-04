@@ -203,36 +203,58 @@ def evaluate_game_detailed(pgn_content: str, depth: int = 15) -> Dict[int, Dict[
     Returns:
         Dictionary mapping move numbers to detailed evaluations
     """
-    game = chess.pgn.read_game(io.StringIO(pgn_content))
+    try:
+        game = chess.pgn.read_game(io.StringIO(pgn_content))
+    except Exception as e:
+        print(f"Error parsing PGN in evaluate_game_detailed: {e}")
+        return {}
     
     if not game:
+        return {}
+    
+    # Validate the game has moves
+    move_list = list(game.mainline_moves())
+    if not move_list:
+        print("Warning: Game has no valid moves for analysis")
         return {}
     
     analysis = {}
     board = game.board()
     
-    with StockfishAnalyzer(depth=depth) as analyzer:
-        # Analyze starting position
-        initial_eval = analyzer.analyze_position(board, depth)
-        analysis[-1] = initial_eval  # Position before first move
-        
-        move_num = 0
-        for move_node in game.mainline():
-            move = move_node.move
+    try:
+        with StockfishAnalyzer(depth=depth) as analyzer:
+            # Analyze starting position
+            initial_eval = analyzer.analyze_position(board, depth)
+            analysis[-1] = initial_eval  # Position before first move
             
-            # Compare the move with best move
-            comparison = analyzer.compare_move(board, move, depth)
+            move_num = 0
+            for move_node in game.mainline():
+                move = move_node.move
+                
+                # Validate move is legal
+                if move not in board.legal_moves:
+                    print(f"Warning: Skipping illegal move at position {move_num}")
+                    move_num += 1
+                    continue
+                
+                # Compare the move with best move
+                comparison = analyzer.compare_move(board, move, depth)
+                
+                # Store the analysis
+                analysis[move_num] = comparison
+                
+                # Make the move
+                board.push(move)
+                move_num += 1
             
-            # Store the analysis
-            analysis[move_num] = comparison
-            
-            # Make the move
-            board.push(move)
-            move_num += 1
-        
-        # Analyze final position
-        final_eval = analyzer.analyze_position(board, depth)
-        analysis[move_num] = final_eval
+            # Analyze final position
+            final_eval = analyzer.analyze_position(board, depth)
+            analysis[move_num] = final_eval
+    
+    except Exception as e:
+        print(f"Error during Stockfish analysis: {e}")
+        # Return what we have so far
+        pass
     
     return analysis
 

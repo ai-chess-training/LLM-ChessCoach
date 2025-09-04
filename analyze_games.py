@@ -3,6 +3,7 @@ import argparse
 import chess.pgn
 import chess
 import io
+import re
 from openai import OpenAI
 import concurrent.futures
 import multiprocessing
@@ -20,17 +21,196 @@ from stockfish_engine import (
 )
 
 def extract_players_from_pgn(pgn_content: str) -> tuple:
-    """Extract White and Black players from PGN content."""
-    game = chess.pgn.read_game(io.StringIO(pgn_content))
-    if not game:
+    """Extract White and Black players from PGN content with error handling."""
+    try:
+        game = chess.pgn.read_game(io.StringIO(pgn_content))
+        if not game:
+            return "Unknown", "Unknown"
+        white_player = game.headers.get("White", "Unknown")
+        black_player = game.headers.get("Black", "Unknown")
+        return white_player, black_player
+    except Exception as e:
+        print(f"Warning: Could not extract players from PGN: {e}")
         return "Unknown", "Unknown"
-    white_player = game.headers.get("White", "Unknown")
-    black_player = game.headers.get("Black", "Unknown")
-    return white_player, black_player
 
 def get_game_from_pgn(pgn_content: str):
-    """Parse PGN content and return game object."""
-    return chess.pgn.read_game(io.StringIO(pgn_content))
+    """Parse PGN content and return game object with error handling."""
+    try:
+        # Create a custom visitor that ignores variations and comments
+        class SimpleGameBuilder(chess.pgn.BaseVisitor):
+            def __init__(self):
+                self.game = chess.pgn.Game()
+                self.current_node = self.game
+                self.board_stack = [self.game.board()]
+                
+            def visit_header(self, tagname, tagvalue):
+                self.game.headers[tagname] = tagvalue
+                
+            def visit_move(self, board, move):
+                self.current_node = self.current_node.add_variation(move)
+                board.push(move)
+                
+            def result(self):
+                return self.game
+        
+        # First try standard parsing
+        game = None
+        try:
+            game = chess.pgn.read_game(io.StringIO(pgn_content))
+            # Validate by replaying
+            if game:
+                board = game.board()
+                for move in game.mainline_moves():
+                    if move not in board.legal_moves:
+                        print(f"Warning: Found illegal move, attempting repair...")
+                        game = None
+                        break
+                    board.push(move)
+        except Exception as e:
+            print(f"Standard parsing failed: {e}")
+            game = None
+        
+        # If standard parsing failed, try simplified parsing
+        if not game:
+            print("  Attempting simplified parsing...")
+            visitor = SimpleGameBuilder()
+            
+            # Parse headers manually
+            lines = pgn_content.strip().split('\n')
+            movetext_lines = []
+            
+            for line in lines:
+                line = line.strip()
+                if line.startswith('[') and line.endswith(']'):
+                    # Parse header
+                    import re
+                    match = re.match(r'\[(\w+)\s+"(.*)"\]', line)
+                    if match:
+                        visitor.visit_header(match.group(1), match.group(2))
+                elif line and not line.startswith('['):
+                    movetext_lines.append(line)
+            
+            # Parse movetext
+            movetext = ' '.join(movetext_lines)
+            game = repair_pgn(pgn_content)
+        
+        return game
+        
+    except Exception as e:
+        print(f"Critical error parsing PGN: {e}")
+        return None
+
+def repair_pgn(pgn_content: str):
+    """Attempt to repair a malformed PGN by extracting moves and rebuilding."""
+    try:
+        import re
+        
+        # Extract headers and movetext
+        lines = pgn_content.split('\n')
+        headers = {}
+        movetext_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            if line.startswith('[') and line.endswith(']'):
+                # Header line
+                match = re.match(r'\[(\w+)\s+"(.*)"\]', line)
+                if match:
+                    headers[match.group(1)] = match.group(2)
+            elif line and not line.startswith('['):
+                movetext_lines.append(line)
+        
+        # Join and clean movetext
+        full_movetext = ' '.join(movetext_lines)
+        
+        # Remove result from movetext
+        full_movetext = re.sub(r'(1-0|0-1|1/2-1/2|\*)$', '', full_movetext)
+        
+        # Remove comments, variations, and NAGs
+        full_movetext = re.sub(r'\{[^}]*\}', '', full_movetext)  # Remove comments
+        full_movetext = re.sub(r'\([^)]*\)', '', full_movetext)  # Remove variations
+        full_movetext = re.sub(r'\$\d+', '', full_movetext)      # Remove NAG annotations
+        full_movetext = re.sub(r'[!?]+', '', full_movetext)       # Remove annotations like !, ?, !!, etc.
+        
+        # Extract moves more carefully
+        # Match move numbers and moves separately
+        tokens = full_movetext.split()
+        
+        # Create new game
+        game = chess.pgn.Game()
+        
+        # Set headers
+        for key, value in headers.items():
+            game.headers[key] = value
+        
+        # Parse moves
+        board = game.board()
+        node = game
+        current_move_number = 1
+        expecting_white = True
+        
+        i = 0
+        while i < len(tokens):
+            token = tokens[i].strip()
+            
+            # Skip move numbers
+            if re.match(r'^\d+\.+$', token):
+                i += 1
+                continue
+            
+            # Check if it looks like a move
+            if re.match(r'^[a-hNBRQKO]', token, re.IGNORECASE):
+                # Clean the move text
+                move_text = token.strip('.,+#x ')
+                
+                # Handle castling
+                if move_text.upper() in ['O-O', '0-0']:
+                    move_text = 'O-O'
+                elif move_text.upper() in ['O-O-O', '0-0-0']:
+                    move_text = 'O-O-O'
+                
+                try:
+                    # Try to parse the move
+                    move = board.parse_san(move_text)
+                    node = node.add_variation(move)
+                    board.push(move)
+                except Exception as e:
+                    # Try alternative interpretations
+                    alternatives = [
+                        move_text.replace('x', ''),  # Remove capture notation
+                        move_text.replace('+', ''),   # Remove check notation
+                        move_text.replace('#', ''),   # Remove checkmate notation
+                        move_text.upper(),            # Try uppercase
+                        move_text.lower(),            # Try lowercase
+                    ]
+                    
+                    move_parsed = False
+                    for alt in alternatives:
+                        try:
+                            move = board.parse_san(alt)
+                            node = node.add_variation(move)
+                            board.push(move)
+                            move_parsed = True
+                            break
+                        except:
+                            continue
+                    
+                    if not move_parsed:
+                        print(f"  Skipping unparseable move: {token}")
+            
+            i += 1
+        
+        # Return the game if we got any valid moves
+        if len(list(game.mainline_moves())) > 0:
+            print(f"  Successfully repaired PGN with {len(list(game.mainline_moves()))} moves")
+            return game
+        else:
+            print("  Could not extract any valid moves from PGN")
+            return None
+        
+    except Exception as e:
+        print(f"  Failed to repair PGN: {e}")
+        return None
 
 def format_stockfish_eval(eval_data: Dict[str, Any]) -> str:
     """Format Stockfish evaluation data for readability."""
@@ -77,64 +257,174 @@ def format_stockfish_eval(eval_data: Dict[str, Any]) -> str:
     
     return " | ".join(formatted) if formatted else "No evaluation available"
 
-def analyze_position_with_context(board: chess.Board, move_number: int, move_played: str, 
-                                 stockfish_eval: Dict[str, Any], white_player: str, 
-                                 black_player: str, game_phase: str = "middlegame") -> str:
-    """Generate ChatGPT analysis for a specific position with Stockfish context."""
+def analyze_all_positions_batch(positions_data: List[Dict[str, Any]], white_player: str, 
+                               black_player: str, user_alias: str, max_moves_per_batch: int = 100) -> List[str]:
+    """
+    Generate ChatGPT analysis for all positions in batch calls.
+    Will split into multiple batches if game is very long.
+    """
     client = OpenAI()
+    all_commentaries = []
     
-    # Determine game phase
-    piece_count = len(board.piece_map())
-    if piece_count <= 7:
-        game_phase = "endgame"
-    elif piece_count >= 28:
-        game_phase = "opening"
-    else:
-        game_phase = "middlegame"
-    
-    # Format the evaluation
-    eval_str = format_stockfish_eval(stockfish_eval)
-    
-    # Build detailed context
-    side_to_move = "White" if move_number % 2 == 1 else "Black"
-    move_display = f"{move_number // 2 + 1}{'.' if side_to_move == 'White' else '...'}{move_played}"
-    
-    # Extract specific insights from Stockfish
-    is_best_move = False
-    eval_loss = 0
-    better_move = None
-    
-    if 'evaluation' in stockfish_eval:
-        eval_info = stockfish_eval['evaluation']
-        is_best_move = eval_info.get('is_best', False)
-        eval_loss = eval_info.get('eval_loss', 0)
-        better_move = eval_info.get('best_move_san')
-    
-    prompt = f"""You are an instructive chess coach analyzing move {move_display} in the {game_phase} of a game between {white_player} (White) and {black_player} (Black).
+    # Process in batches if game is very long
+    for batch_start in range(0, len(positions_data), max_moves_per_batch):
+        batch_end = min(batch_start + max_moves_per_batch, len(positions_data))
+        batch_positions = positions_data[batch_start:batch_end]
+        
+        if len(positions_data) > max_moves_per_batch:
+            print(f"    Processing moves {batch_start+1}-{batch_end} of {len(positions_data)}...")
+        
+        # Build a comprehensive prompt with positions in this batch
+        positions_info = []
+        for pos in batch_positions:
+            move_number = pos['move_number']
+            side = pos['side']
+            move_played = pos['move']
+            stockfish_eval = pos['stockfish_eval']
+            game_phase = pos['game_phase']
+            
+            # Format evaluation
+            eval_str = format_stockfish_eval(stockfish_eval)
+            
+            # Extract move quality info
+            is_best_move = False
+            eval_loss = 0
+            better_move = None
+            
+            if 'evaluation' in stockfish_eval:
+                eval_info = stockfish_eval['evaluation']
+                is_best_move = eval_info.get('is_best', False)
+                eval_loss = eval_info.get('eval_loss', 0)
+                better_move = eval_info.get('best_move_san')
+            
+            move_quality = 'Best move' if is_best_move else f'Loses {eval_loss:.2f} pawns' if eval_loss > 0.1 else 'Good move'
+            
+            position_entry = {
+                "move_number": move_number,
+                "side": side,
+                "move": move_played,
+                "phase": game_phase,
+                "stockfish_eval": eval_str,
+                "is_best": is_best_move,
+                "better_move": better_move if not is_best_move else None,
+                "eval_loss": eval_loss
+            }
+            positions_info.append(position_entry)
+        
+        # Create the batch prompt
+        prompt = f"""You are an instructive chess coach analyzing {'a portion of' if len(positions_data) > max_moves_per_batch else ''} a game between {white_player} (White) and {black_player} (Black) for {user_alias}.
 
-Stockfish Analysis: {eval_str}
-Move Quality: {'Best move' if is_best_move else f'Suboptimal (loses {eval_loss:.2f} pawns)' if eval_loss > 0.1 else 'Good move'}
+I will provide you with {'some' if len(positions_data) > max_moves_per_batch else 'all the'} moves and their Stockfish evaluations. Please provide educational commentary for EACH move.
 
-Provide brief, instructive commentary (2-3 sentences) that:
+For each move, provide 2-3 sentences of instructive commentary that:
 1. Explains the key idea behind the move or position
-2. {'Praises the accurate play' if is_best_move else f'Suggests {better_move} was more accurate and explains why' if better_move and not is_best_move else 'Describes the position characteristics'}
-3. Mentions any tactical themes, strategic plans, or instructive patterns
+2. Praises accurate play or suggests improvements when moves are suboptimal
+3. Mentions tactical themes, strategic plans, or instructive patterns
 
-Keep it educational and constructive."""
+IMPORTANT: Return your response as a valid JSON array where each element corresponds to one move in order. Each element should be a string containing the commentary for that move.
 
-    completion = client.chat.completions.create(
-        model="gpt-5-nano",  # Using gpt-5-nano for better analysis
-        messages=[
-            {"role": "system", "content": "You are a friendly chess instructor providing clear, concise, educational commentary."},
-            {"role": "user", "content": prompt}
-        ],
-    )
-    return completion.choices[0].message.content.strip()
+Here are the moves to analyze:
 
-def analyze_game_combined(pgn_content: str, user_alias: str, stockfish_depth: int = 15) -> Optional[Dict[str, Any]]:
+{json.dumps(positions_info, indent=2)}
+
+Return ONLY a JSON array of commentary strings, one for each move, in the exact same order as provided above. Example format:
+[
+  "Commentary for move 1...",
+  "Commentary for move 2...",
+  "Commentary for move 3..."
+]
+"""
+
+        try:
+            completion = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a chess instructor. Return ONLY a valid JSON array of commentary strings."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=4000
+            )
+            
+            response = completion.choices[0].message.content.strip()
+            
+            # Parse the JSON response
+            try:
+                # Clean the response if needed (remove markdown code blocks if present)
+                if response.startswith("```json"):
+                    response = response[7:]
+                if response.startswith("```"):
+                    response = response[3:]
+                if response.endswith("```"):
+                    response = response[:-3]
+                
+                commentaries = json.loads(response.strip())
+                
+                # Validate we got the right number of commentaries
+                if len(commentaries) != len(batch_positions):
+                    print(f"Warning: Expected {len(batch_positions)} commentaries, got {len(commentaries)}")
+                    # Pad or truncate as needed
+                    while len(commentaries) < len(batch_positions):
+                        commentaries.append("Position analysis unavailable.")
+                    commentaries = commentaries[:len(batch_positions)]
+                
+                all_commentaries.extend(commentaries)
+                
+            except json.JSONDecodeError as e:
+                print(f"Error parsing ChatGPT JSON response: {e}")
+                print(f"Response preview: {response[:500]}...")
+                # Fallback: return generic commentaries for this batch
+                all_commentaries.extend([f"Move {pos['move_number']}: Analysis unavailable due to parsing error." 
+                                        for pos in batch_positions])
+                
+        except Exception as e:
+            print(f"Error calling ChatGPT API: {e}")
+            # Fallback to GPT-3.5-turbo
+            try:
+                completion = client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {"role": "system", "content": "Return ONLY a valid JSON array of chess move commentaries."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=3000
+                )
+                
+                response = completion.choices[0].message.content.strip()
+                if response.startswith("```"):
+                    response = response[3:]
+                    if response.startswith("json"):
+                        response = response[4:]
+                if response.endswith("```"):
+                    response = response[:-3]
+                    
+                commentaries = json.loads(response.strip())
+                
+                # Validate and adjust length
+                while len(commentaries) < len(batch_positions):
+                    commentaries.append("Position analysis unavailable.")
+                all_commentaries.extend(commentaries[:len(batch_positions)])
+                
+            except Exception as e2:
+                print(f"Fallback to GPT-3.5 also failed: {e2}")
+                # Final fallback: return basic commentaries
+                all_commentaries.extend([f"Move {pos['move_number']}: {pos['move']}. {format_stockfish_eval(pos['stockfish_eval'])}" 
+                                        for pos in batch_positions])
+    
+    return all_commentaries
+
+def analyze_game_combined(pgn_content: str, user_alias: str, stockfish_depth: int = 15, batch_size: int = 100) -> Optional[Dict[str, Any]]:
     """Analyze a chess game by combining Stockfish evaluation with ChatGPT commentary."""
     game = get_game_from_pgn(pgn_content)
     if not game:
+        print("  Warning: Could not parse PGN file")
+        return None
+    
+    # Validate that the game has moves
+    move_count = len(list(game.mainline_moves()))
+    if move_count == 0:
+        print("  Warning: Game has no valid moves")
         return None
     
     white_player = game.headers.get("White", "Unknown")
@@ -149,7 +439,7 @@ def analyze_game_combined(pgn_content: str, user_alias: str, stockfish_depth: in
     # Get detailed Stockfish analysis
     stockfish_analysis = evaluate_game_detailed(pgn_content, depth=stockfish_depth)
     
-    # Generate move-by-move combined analysis
+    # Prepare combined analysis structure
     combined_analysis = {
         "white": white_player,
         "black": black_player,
@@ -164,13 +454,16 @@ def analyze_game_combined(pgn_content: str, user_alias: str, stockfish_depth: in
     
     board = game.board()
     move_number = 0
+    positions_data = []
     
     # Add initial position evaluation
     if -1 in stockfish_analysis:
         initial_eval = stockfish_analysis[-1]
         combined_analysis["initial_evaluation"] = format_stockfish_eval(initial_eval)
     
-    print("Generating move-by-move commentary...")
+    print("Collecting position data...")
+    
+    # First pass: Collect all position data for batch processing
     for move_node in game.mainline():
         move = move_node.move
         san_move = board.san(move)
@@ -178,36 +471,68 @@ def analyze_game_combined(pgn_content: str, user_alias: str, stockfish_depth: in
         # Get Stockfish evaluation for this move
         stockfish_eval = stockfish_analysis.get(move_number, {})
         
-        # Generate ChatGPT commentary
-        commentary = analyze_position_with_context(
-            board,
-            move_number,
-            san_move,
-            stockfish_eval,
-            white_player,
-            black_player
-        )
+        # Determine game phase
+        piece_count = len(board.piece_map())
+        if piece_count <= 7:
+            game_phase = "endgame"
+        elif piece_count >= 28:
+            game_phase = "opening"
+        else:
+            game_phase = "middlegame"
         
-        # Store the combined analysis
-        move_analysis = {
+        # Store position data for batch processing
+        positions_data.append({
             "move_number": move_number // 2 + 1,
             "side": "white" if move_number % 2 == 0 else "black",
             "move": san_move,
             "fen_before": board.fen(),
-            "stockfish": stockfish_eval,
-            "commentary": commentary
-        }
+            "stockfish_eval": stockfish_eval,
+            "game_phase": game_phase
+        })
         
-        # Add the move to the FEN
+        # Make the move on the board
         board.push(move)
-        move_analysis["fen_after"] = board.fen()
-        
-        combined_analysis["moves"].append(move_analysis)
         move_number += 1
         
         # Progress indicator
         if move_number % 10 == 0:
             print(f"  Processed {move_number} moves...")
+    
+    # Batch process all positions with ChatGPT
+    num_batches = (len(positions_data) + batch_size - 1) // batch_size
+    if num_batches > 1:
+        print(f"Generating commentary for {len(positions_data)} moves in {num_batches} batches...")
+    else:
+        print(f"Generating commentary for all {len(positions_data)} moves in a single batch...")
+    
+    commentaries = analyze_all_positions_batch(
+        positions_data, white_player, black_player, user_alias, max_moves_per_batch=batch_size
+    )
+    
+    # Second pass: Combine Stockfish analysis with ChatGPT commentary
+    board = game.board()  # Reset board
+    for i, move_node in enumerate(game.mainline()):
+        move = move_node.move
+        
+        # Get the position data and commentary
+        pos_data = positions_data[i]
+        commentary = commentaries[i] if i < len(commentaries) else "Analysis unavailable."
+        
+        # Create the combined move analysis
+        move_analysis = {
+            "move_number": pos_data["move_number"],
+            "side": pos_data["side"],
+            "move": pos_data["move"],
+            "fen_before": pos_data["fen_before"],
+            "stockfish": pos_data["stockfish_eval"],
+            "commentary": commentary
+        }
+        
+        # Add the move to get fen_after
+        board.push(move)
+        move_analysis["fen_after"] = board.fen()
+        
+        combined_analysis["moves"].append(move_analysis)
     
     # Calculate game statistics
     stats = get_game_statistics([{
@@ -217,7 +542,41 @@ def analyze_game_combined(pgn_content: str, user_alias: str, stockfish_depth: in
     
     combined_analysis["statistics"] = stats
     
+    print(f"  Analysis complete - processed {len(combined_analysis['moves'])} moves")
+    
     return combined_analysis
+
+def estimate_api_cost_savings(avg_moves_per_game: int, num_games: int, batch_size: int = 100) -> Dict[str, float]:
+    """Estimate API cost savings from batching."""
+    # Rough token estimates (vary based on actual content)
+    tokens_per_single_call = 300  # Request + response per position
+    tokens_per_batch_call = 200 + (min(avg_moves_per_game, batch_size) * 50)  # Batch overhead + per-position
+    
+    # GPT-4o-mini pricing (as of September 2025)
+    cost_per_1k_input = 0.00015
+    cost_per_1k_output = 0.0006
+    
+    # Old method: one call per position
+    old_calls = avg_moves_per_game * num_games
+    old_tokens = old_calls * tokens_per_single_call
+    old_cost = (old_tokens / 1000) * ((cost_per_1k_input + cost_per_1k_output) / 2)
+    
+    # New method: batched calls
+    batches_per_game = (avg_moves_per_game + batch_size - 1) // batch_size
+    new_calls = batches_per_game * num_games
+    new_tokens = new_calls * tokens_per_batch_call
+    new_cost = (new_tokens / 1000) * ((cost_per_1k_input + cost_per_1k_output) / 2)
+    
+    return {
+        "old_api_calls": old_calls,
+        "new_api_calls": new_calls,
+        "calls_saved": old_calls - new_calls,
+        "reduction_percentage": ((old_calls - new_calls) / old_calls * 100) if old_calls > 0 else 0,
+        "estimated_old_cost": old_cost,
+        "estimated_new_cost": new_cost,
+        "estimated_savings": old_cost - new_cost,
+        "batches_per_game": batches_per_game
+    }
 
 def generate_overall_analysis(all_games_analysis: List[Dict[str, Any]], user_alias: str) -> str:
     """Generate comprehensive overall analysis based on multiple games."""
@@ -273,14 +632,29 @@ Please provide:
 
 Make your advice actionable and encouraging while being honest about areas for improvement."""
     
-    completion = client.chat.completions.create(
-        model="gpt-5-nano",
-        messages=[
-            {"role": "system", "content": "You are an experienced chess coach providing comprehensive, actionable improvement advice."},
-            {"role": "user", "content": prompt}
-        ],
-    )
-    return stats_summary + "\n" + completion.choices[0].message.content
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are an experienced chess coach providing comprehensive, actionable improvement advice."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=800
+        )
+        return stats_summary + "\n" + completion.choices[0].message.content
+    except Exception as e:
+        print(f"Error generating overall analysis: {e}")
+        # Fallback to gpt-3.5-turbo
+        try:
+            completion = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=600
+            )
+            return stats_summary + "\n" + completion.choices[0].message.content
+        except:
+            return stats_summary + "\n\nUnable to generate detailed analysis due to an error."
 
 def save_analysis_results(analysis: Dict[str, Any], output_dir: str, game_name: str):
     """Save analysis results in multiple formats."""
@@ -330,7 +704,8 @@ def save_analysis_results(analysis: Dict[str, Any], output_dir: str, game_name: 
     
     print(f"  Readable analysis saved to {text_file}")
 
-def analyze_games(pgn_folder: str, user_alias: str, stockfish_depth: int = 15, max_workers: Optional[int] = None):
+def analyze_games(pgn_folder: str, user_alias: str, stockfish_depth: int = 15, 
+                 max_workers: Optional[int] = None, batch_size: int = 100):
     """Analyze a batch of chess games with combined Stockfish and ChatGPT analysis."""
     
     game_data = []
@@ -359,7 +734,11 @@ def analyze_games(pgn_folder: str, user_alias: str, stockfish_depth: int = 15, m
 
     print(f"\nFound {len(game_data)} PGN files to analyze")
     print(f"Using Stockfish depth: {stockfish_depth}")
+    print(f"ChatGPT batch size: {batch_size} moves per call")
     print(f"Analysis will be saved to: {analysis_folder}\n")
+    
+    successful_analyses = 0
+    failed_analyses = []
 
     # Analyze each game
     for idx, (pgn_content, filename) in enumerate(game_data, 1):
@@ -376,6 +755,7 @@ def analyze_games(pgn_folder: str, user_alias: str, stockfish_depth: int = 15, m
                 with open(analysis_file, 'r') as f:
                     analysis = json.load(f)
                 all_analyses.append(analysis)
+                successful_analyses += 1
                 continue
             except Exception as e:
                 print(f"  Error loading cached analysis: {e}")
@@ -384,7 +764,7 @@ def analyze_games(pgn_folder: str, user_alias: str, stockfish_depth: int = 15, m
         # Perform combined analysis
         try:
             start_time = time.time()
-            analysis = analyze_game_combined(pgn_content, user_alias, stockfish_depth)
+            analysis = analyze_game_combined(pgn_content, user_alias, stockfish_depth, batch_size)
             
             if analysis:
                 # Save the analysis
@@ -392,20 +772,50 @@ def analyze_games(pgn_folder: str, user_alias: str, stockfish_depth: int = 15, m
                 all_analyses.append(analysis)
                 
                 elapsed = time.time() - start_time
-                print(f"  Analysis completed in {elapsed:.1f} seconds")
+                print(f"  Total analysis time: {elapsed:.1f} seconds")
+                successful_analyses += 1
             else:
-                print(f"  Failed to analyze game")
+                print(f"  Skipping game due to parsing errors")
+                failed_analyses.append(filename)
+                # Save error log
+                error_file = os.path.join(analysis_folder, f'{game_name}_error.txt')
+                with open(error_file, 'w') as f:
+                    f.write(f"Failed to analyze {filename}\n")
+                    f.write(f"The PGN file may be corrupted or contain illegal moves.\n")
+                    f.write(f"Original PGN content:\n\n{pgn_content}\n")
+                print(f"  Error details saved to {error_file}")
                 
         except Exception as e:
             print(f"  Error analyzing game: {e}")
-            import traceback
-            traceback.print_exc()
+            failed_analyses.append(filename)
+            # Save error log
+            error_file = os.path.join(analysis_folder, f'{game_name}_error.txt')
+            with open(error_file, 'w') as f:
+                f.write(f"Error analyzing {filename}: {e}\n")
+                import traceback
+                f.write(traceback.format_exc())
+            print(f"  Error details saved to {error_file}")
+            continue  # Continue with next game
     
     # Generate overall analysis
     if all_analyses:
         print("\n" + "=" * 60)
         print("Generating overall analysis for all games...")
         print("=" * 60)
+        
+        # Calculate and display API cost savings
+        total_moves = sum(len(a.get('moves', [])) for a in all_analyses)
+        avg_moves_per_game = total_moves // len(all_analyses) if all_analyses else 0
+        savings = estimate_api_cost_savings(avg_moves_per_game, len(all_analyses), batch_size)
+        
+        print(f"\nAPI Efficiency Report:")
+        print(f"  Total moves analyzed: {total_moves}")
+        print(f"  Average moves per game: {avg_moves_per_game}")
+        print(f"  Batch size: {batch_size} moves per API call")
+        print(f"  Traditional approach: {savings['old_api_calls']} API calls")
+        print(f"  Batched approach: {savings['new_api_calls']} API calls ({savings['batches_per_game']:.1f} per game)")
+        print(f"  Calls saved: {savings['calls_saved']} ({savings['reduction_percentage']:.1f}% reduction)")
+        print(f"  Estimated cost savings: ${savings['estimated_savings']:.4f}")
         
         overall_analysis = generate_overall_analysis(all_analyses, user_alias)
         
@@ -446,6 +856,9 @@ def analyze_games(pgn_folder: str, user_alias: str, stockfish_depth: int = 15, m
     
     print("\n" + "=" * 60)
     print("Analysis complete!")
+    print(f"Successfully analyzed: {successful_analyses}/{len(game_data)} games")
+    if failed_analyses:
+        print(f"Failed to analyze: {', '.join(failed_analyses)}")
     print("=" * 60)
     
     return True
@@ -459,12 +872,15 @@ Examples:
   python analyze_game.py --pgn_folder ./games --user_alias "John Doe"
   python analyze_game.py --pgn_folder ./games --user_alias "John Doe" --depth 20
   python analyze_game.py --pgn_folder ./games --user_alias "John Doe" --workers 2
+  python analyze_game.py --pgn_folder ./games --user_alias "John Doe" --batch_size 50
         """
     )
     parser.add_argument("--pgn_folder", required=True, help="Folder containing PGN files to analyze")
     parser.add_argument("--user_alias", required=True, help="User alias for personalized analysis")
     parser.add_argument("--depth", type=int, default=15, help="Stockfish analysis depth (default: 15)")
     parser.add_argument("--workers", type=int, default=None, help="Number of parallel workers (default: auto)")
+    parser.add_argument("--batch_size", type=int, default=100, 
+                       help="Max moves per ChatGPT batch call (default: 100, use lower for very long games)")
 
     args = parser.parse_args()
     
@@ -477,7 +893,7 @@ Examples:
         print(f"Warning: Depth {args.depth} is unusual. Recommended range is 10-20.")
     
     # Run analysis
-    analyze_games(args.pgn_folder, args.user_alias, args.depth, args.workers)
+    analyze_games(args.pgn_folder, args.user_alias, args.depth, args.workers, args.batch_size)
 
 if __name__ == "__main__":
     main()
