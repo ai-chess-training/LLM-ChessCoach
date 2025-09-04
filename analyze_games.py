@@ -335,82 +335,45 @@ Return ONLY a JSON array of commentary strings, one for each move, in the exact 
 ]
 """
 
+        completion = client.chat.completions.create(
+            model="gpt-5-nano",
+            messages=[
+                {"role": "system", "content": "You are a chess instructor. Return ONLY a valid JSON array of commentary strings."},
+                {"role": "user", "content": prompt}
+            ],
+        )
+        
+        response = completion.choices[0].message.content.strip()
+        
+        # Parse the JSON response
         try:
-            completion = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "You are a chess instructor. Return ONLY a valid JSON array of commentary strings."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7,
-                max_tokens=4000
-            )
+            # Clean the response if needed (remove markdown code blocks if present)
+            if response.startswith("```json"):
+                response = response[7:]
+            if response.startswith("```"):
+                response = response[3:]
+            if response.endswith("```"):
+                response = response[:-3]
             
-            response = completion.choices[0].message.content.strip()
+            commentaries = json.loads(response.strip())
             
-            # Parse the JSON response
-            try:
-                # Clean the response if needed (remove markdown code blocks if present)
-                if response.startswith("```json"):
-                    response = response[7:]
-                if response.startswith("```"):
-                    response = response[3:]
-                if response.endswith("```"):
-                    response = response[:-3]
-                
-                commentaries = json.loads(response.strip())
-                
-                # Validate we got the right number of commentaries
-                if len(commentaries) != len(batch_positions):
-                    print(f"Warning: Expected {len(batch_positions)} commentaries, got {len(commentaries)}")
-                    # Pad or truncate as needed
-                    while len(commentaries) < len(batch_positions):
-                        commentaries.append("Position analysis unavailable.")
-                    commentaries = commentaries[:len(batch_positions)]
-                
-                all_commentaries.extend(commentaries)
-                
-            except json.JSONDecodeError as e:
-                print(f"Error parsing ChatGPT JSON response: {e}")
-                print(f"Response preview: {response[:500]}...")
-                # Fallback: return generic commentaries for this batch
-                all_commentaries.extend([f"Move {pos['move_number']}: Analysis unavailable due to parsing error." 
-                                        for pos in batch_positions])
-                
-        except Exception as e:
-            print(f"Error calling ChatGPT API: {e}")
-            # Fallback to GPT-3.5-turbo
-            try:
-                completion = client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[
-                        {"role": "system", "content": "Return ONLY a valid JSON array of chess move commentaries."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.7,
-                    max_tokens=3000
-                )
-                
-                response = completion.choices[0].message.content.strip()
-                if response.startswith("```"):
-                    response = response[3:]
-                    if response.startswith("json"):
-                        response = response[4:]
-                if response.endswith("```"):
-                    response = response[:-3]
-                    
-                commentaries = json.loads(response.strip())
-                
-                # Validate and adjust length
+            # Validate we got the right number of commentaries
+            if len(commentaries) != len(batch_positions):
+                print(f"Warning: Expected {len(batch_positions)} commentaries, got {len(commentaries)}")
+                # Pad or truncate as needed
                 while len(commentaries) < len(batch_positions):
                     commentaries.append("Position analysis unavailable.")
-                all_commentaries.extend(commentaries[:len(batch_positions)])
+                commentaries = commentaries[:len(batch_positions)]
+            
+            all_commentaries.extend(commentaries)
+            
+        except json.JSONDecodeError as e:
+            print(f"Error parsing ChatGPT JSON response: {e}")
+            print(f"Response preview: {response[:500]}...")
+            # Fallback: return generic commentaries for this batch
+            all_commentaries.extend([f"Move {pos['move_number']}: Analysis unavailable due to parsing error." 
+                                    for pos in batch_positions])
                 
-            except Exception as e2:
-                print(f"Fallback to GPT-3.5 also failed: {e2}")
-                # Final fallback: return basic commentaries
-                all_commentaries.extend([f"Move {pos['move_number']}: {pos['move']}. {format_stockfish_eval(pos['stockfish_eval'])}" 
-                                        for pos in batch_positions])
     
     return all_commentaries
 
@@ -546,37 +509,6 @@ def analyze_game_combined(pgn_content: str, user_alias: str, stockfish_depth: in
     
     return combined_analysis
 
-def estimate_api_cost_savings(avg_moves_per_game: int, num_games: int, batch_size: int = 100) -> Dict[str, float]:
-    """Estimate API cost savings from batching."""
-    # Rough token estimates (vary based on actual content)
-    tokens_per_single_call = 300  # Request + response per position
-    tokens_per_batch_call = 200 + (min(avg_moves_per_game, batch_size) * 50)  # Batch overhead + per-position
-    
-    # GPT-4o-mini pricing (as of September 2025)
-    cost_per_1k_input = 0.00015
-    cost_per_1k_output = 0.0006
-    
-    # Old method: one call per position
-    old_calls = avg_moves_per_game * num_games
-    old_tokens = old_calls * tokens_per_single_call
-    old_cost = (old_tokens / 1000) * ((cost_per_1k_input + cost_per_1k_output) / 2)
-    
-    # New method: batched calls
-    batches_per_game = (avg_moves_per_game + batch_size - 1) // batch_size
-    new_calls = batches_per_game * num_games
-    new_tokens = new_calls * tokens_per_batch_call
-    new_cost = (new_tokens / 1000) * ((cost_per_1k_input + cost_per_1k_output) / 2)
-    
-    return {
-        "old_api_calls": old_calls,
-        "new_api_calls": new_calls,
-        "calls_saved": old_calls - new_calls,
-        "reduction_percentage": ((old_calls - new_calls) / old_calls * 100) if old_calls > 0 else 0,
-        "estimated_old_cost": old_cost,
-        "estimated_new_cost": new_cost,
-        "estimated_savings": old_cost - new_cost,
-        "batches_per_game": batches_per_game
-    }
 
 def generate_overall_analysis(all_games_analysis: List[Dict[str, Any]], user_alias: str) -> str:
     """Generate comprehensive overall analysis based on multiple games."""
@@ -632,29 +564,14 @@ Please provide:
 
 Make your advice actionable and encouraging while being honest about areas for improvement."""
     
-    try:
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are an experienced chess coach providing comprehensive, actionable improvement advice."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.7,
-            max_tokens=800
-        )
-        return stats_summary + "\n" + completion.choices[0].message.content
-    except Exception as e:
-        print(f"Error generating overall analysis: {e}")
-        # Fallback to gpt-3.5-turbo
-        try:
-            completion = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=600
-            )
-            return stats_summary + "\n" + completion.choices[0].message.content
-        except:
-            return stats_summary + "\n\nUnable to generate detailed analysis due to an error."
+    completion = client.chat.completions.create(
+        model="gpt-5-nano",
+        messages=[
+            {"role": "system", "content": "You are an experienced chess coach providing comprehensive, actionable improvement advice."},
+            {"role": "user", "content": prompt}
+        ],
+    )
+    return stats_summary + "\n" + completion.choices[0].message.content
 
 def save_analysis_results(analysis: Dict[str, Any], output_dir: str, game_name: str):
     """Save analysis results in multiple formats."""
@@ -803,21 +720,10 @@ def analyze_games(pgn_folder: str, user_alias: str, stockfish_depth: int = 15,
         print("Generating overall analysis for all games...")
         print("=" * 60)
         
-        # Calculate and display API cost savings
         total_moves = sum(len(a.get('moves', [])) for a in all_analyses)
         avg_moves_per_game = total_moves // len(all_analyses) if all_analyses else 0
-        savings = estimate_api_cost_savings(avg_moves_per_game, len(all_analyses), batch_size)
         
-        print(f"\nAPI Efficiency Report:")
-        print(f"  Total moves analyzed: {total_moves}")
-        print(f"  Average moves per game: {avg_moves_per_game}")
-        print(f"  Batch size: {batch_size} moves per API call")
-        print(f"  Traditional approach: {savings['old_api_calls']} API calls")
-        print(f"  Batched approach: {savings['new_api_calls']} API calls ({savings['batches_per_game']:.1f} per game)")
-        print(f"  Calls saved: {savings['calls_saved']} ({savings['reduction_percentage']:.1f}% reduction)")
-        print(f"  Estimated cost savings: ${savings['estimated_savings']:.4f}")
-        
-        overall_analysis = generate_overall_analysis(all_analyses, user_alias)
+        # overall_analysis = generate_overall_analysis(all_analyses, user_alias)
         
         # Save overall analysis
         overall_file = os.path.join(analysis_folder, "overall_analysis.txt")
@@ -826,8 +732,8 @@ def analyze_games(pgn_folder: str, user_alias: str, stockfish_depth: int = 15,
             f.write("=" * 70 + "\n")
             f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"Games analyzed: {len(all_analyses)}\n")
-            f.write("=" * 70 + "\n\n")
-            f.write(overall_analysis)
+            # f.write("=" * 70 + "\n\n")
+            # f.write(overall_analysis)
         
         print(f"\nOverall analysis saved to: {overall_file}")
         
