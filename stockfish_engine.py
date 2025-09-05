@@ -13,15 +13,19 @@ STOCKFISH_PATH = os.getenv('STOCKFISH_PATH', 'stockfish')
 class StockfishAnalyzer:
     """Enhanced Stockfish analyzer for detailed position analysis."""
     
-    def __init__(self, engine_path: str = STOCKFISH_PATH, depth: int = 15):
+    def __init__(self, engine_path: str = STOCKFISH_PATH, depth: int = 15, nodes_limit: int = 500000):
         """Initialize the Stockfish analyzer."""
         self.engine_path = engine_path
         self.depth = depth
+        self.nodes_limit = nodes_limit
         self.engine = None
+        self.num_threads = min(8, os.cpu_count())
+
     
     def __enter__(self):
         """Context manager entry - start the engine."""
         self.engine = chess.engine.SimpleEngine.popen_uci(self.engine_path)
+        self.engine.configure({"Threads": self.num_threads})
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -29,7 +33,8 @@ class StockfishAnalyzer:
         if self.engine:
             self.engine.quit()
     
-    def analyze_position(self, board: chess.Board, depth: Optional[int] = None) -> Dict[str, Any]:
+    def analyze_position(self, board: chess.Board, depth: Optional[int] = None,
+                         nodes_limit: Optional[int] = None) -> Dict[str, Any]:
         """
         Analyze a single position with Stockfish.
         
@@ -44,9 +49,11 @@ class StockfishAnalyzer:
             raise RuntimeError("Engine not initialized. Use within context manager.")
         
         analysis_depth = depth if depth is not None else self.depth
+        analysis_node_limit = nodes_limit if nodes_limit is not None else self.nodes_limit
         
         try:
-            info = self.engine.analyse(board, chess.engine.Limit(depth=analysis_depth))
+            # info = self.engine.analyse(board, chess.engine.Limit(depth=analysis_depth))
+            info = self.engine.analyse(board, chess.engine.Limit(nodes=analysis_node_limit))
             
             # Extract score
             score = info.get('score', chess.engine.Cp(0))
@@ -99,7 +106,8 @@ class StockfishAnalyzer:
                 'error': str(e)
             }
     
-    def compare_move(self, board: chess.Board, move_played: chess.Move, depth: Optional[int] = None) -> Dict[str, Any]:
+    def compare_move(self, board: chess.Board, move_played: chess.Move, depth: Optional[int] = None,
+                     nodes_limit: Optional[int] = None) -> Dict[str, Any]:
         """
         Compare the move played with the engine's best move.
         
@@ -113,7 +121,7 @@ class StockfishAnalyzer:
             - is_best: Whether the played move was the best
         """
         # Analyze position before the move
-        eval_before = self.analyze_position(board, depth)
+        eval_before = self.analyze_position(board, depth, nodes_limit)
         
         # Get the best move
         best_move = eval_before.get('best_move')
@@ -124,7 +132,7 @@ class StockfishAnalyzer:
         
         # Analyze position after the move
         board.push(move_played)
-        eval_after = self.analyze_position(board, depth)
+        eval_after = self.analyze_position(board, depth, nodes_limit)
         board.pop()  # Restore position
         
         # Calculate evaluation loss
@@ -135,8 +143,7 @@ class StockfishAnalyzer:
             
             # Both are centipawn scores
             if before_cp is not None and after_cp is not None:
-                # From the perspective of the player who just moved
-                eval_loss = abs(before_cp - (-after_cp))  # Negate because perspective changes
+                eval_loss = after_cp - before_cp
         
         return {
             'move_played': move_played_uci,
@@ -150,9 +157,8 @@ class StockfishAnalyzer:
         }
 
 
-def evaluate_game(pgn_path: str, depth: int = 15) -> List[Dict[str, Any]]:
+def evaluate_game(pgn_path: str, depth: int = 15, nodes_limit: int = 500000) -> List[Dict[str, Any]]:
     """
-    Legacy function for backward compatibility.
     Evaluates an entire game from a PGN file.
     
     Args:
@@ -171,13 +177,13 @@ def evaluate_game(pgn_path: str, depth: int = 15) -> List[Dict[str, Any]]:
     evaluations = []
     board = game.board()
     
-    with StockfishAnalyzer(depth=depth) as analyzer:
+    with StockfishAnalyzer(depth=depth, nodes_limit=nodes_limit) as analyzer:
         move_num = 0
         for move_node in game.mainline():
             move = move_node.move
             
             # Analyze the move
-            comparison = analyzer.compare_move(board, move, depth)
+            comparison = analyzer.compare_move(board, move, depth, nodes_limit)
             
             evaluations.append({
                 'move_number': move_num // 2 + 1,
@@ -192,7 +198,8 @@ def evaluate_game(pgn_path: str, depth: int = 15) -> List[Dict[str, Any]]:
     return evaluations
 
 
-def evaluate_game_detailed(pgn_content: str, depth: int = 15) -> Dict[int, Dict[str, Any]]:
+def evaluate_game_detailed(pgn_content: str, depth: int = 15,
+                           nodes_limit: int = 500000) -> Dict[int, Dict[str, Any]]:
     """
     Evaluate a game from PGN content string with detailed position-by-position analysis.
     
@@ -294,50 +301,62 @@ def get_game_statistics(analysis: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     if not analysis:
         return {}
-    
+        
     white_losses = []
     black_losses = []
     white_best_moves = 0
     black_best_moves = 0
     white_moves = 0
     black_moves = 0
+    evals_white_after = []
+    evals_black_after = []
+    evals_white_before = []
+    evals_black_before = []
     
     for move_data in analysis:
         evaluation = move_data.get('evaluation', {})
         eval_loss = evaluation.get('eval_loss', 0)
         is_best = evaluation.get('is_best', False)
         
+        eval_after_move = evaluation.get("eval_after", {}).get('score', {}).get('cp', 0)
+        eval_before_move = evaluation.get("eval_before", {}).get('score', {}).get('cp', 0)
+
         if move_data['side'] == 'white':
             white_moves += 1
             white_losses.append(eval_loss)
+            evals_white_after.append(eval_after_move)
+            evals_white_before.append(eval_before_move)
             if is_best:
                 white_best_moves += 1
         else:
             black_moves += 1
             black_losses.append(eval_loss)
+            evals_black_after.append(eval_after_move)
+            evals_black_before.append(eval_before_move)
             if is_best:
                 black_best_moves += 1
     
-    def calculate_accuracy(losses):
+    def calculate_accuracy( evals_before, evals_after):
         """Calculate accuracy percentage based on centipawn losses."""
-        if not losses:
-            return 100.0
-        # Formula: accuracy = 103.1668 * exp(-0.04354 * avg_centipawn_loss) - 3.1669
-        avg_loss = sum(losses) / len(losses)
         import math
-        accuracy = 103.1668 * math.exp(-0.04354 * avg_loss * 100) - 3.1669
-        return max(0, min(100, accuracy))
+        win_percentages_before = [(50 + 50 * (2 / (1 + math.exp(-0.00368208 * eval)) - 1)) for eval in evals_before]
+        win_percentages_after = [(50 + 50 * (2 / (1 + math.exp(-0.00368208 * eval) ) - 1)) for eval in evals_after]
+        
+        def accuracy(win_after, win_before):
+            return 103.1668 * math.exp(-0.04354 * (win_before - win_after)) - 3.1669
+        
+        accuracy_per_move = [accuracy(wb, wa) for wb, wa in zip(win_percentages_before, win_percentages_after)]
+
+        return accuracy_per_move
     
     return {
         'white': {
-            'avg_centipawn_loss': sum(white_losses) / len(white_losses) if white_losses else 0,
-            'accuracy': calculate_accuracy(white_losses),
+            'accuracy_per_move': calculate_accuracy( evals_white_before, evals_white_after),
             'best_move_percentage': (white_best_moves / white_moves * 100) if white_moves else 0,
             'total_moves': white_moves
         },
         'black': {
-            'avg_centipawn_loss': sum(black_losses) / len(black_losses) if black_losses else 0,
-            'accuracy': calculate_accuracy(black_losses),
+            'accuracy_per_move': calculate_accuracy( evals_black_before, evals_black_after),
             'best_move_percentage': (black_best_moves / black_moves * 100) if black_moves else 0,
             'total_moves': black_moves
         },
@@ -350,19 +369,33 @@ if __name__ == "__main__":
     import sys
     
     if len(sys.argv) < 2:
-        print("Usage: python stockfish_engine.py <pgn_file> [depth]")
+        print("Usage: python stockfish_engine.py <pgn_file> [depth] [nodes_limit]")
         sys.exit(1)
     
     pgn_file = sys.argv[1]
-    depth = int(sys.argv[2]) if len(sys.argv) > 2 else 15
+    depth = int(sys.argv[2]) if len(sys.argv) > 2 else 18
+    nodes_limit = int(sys.argv[3]) if len(sys.argv) > 3 else 500000
     
-    print(f"Analyzing {pgn_file} with depth {depth}...")
-    analysis = evaluate_game(pgn_file, depth)
+    #print(f"Analyzing {pgn_file} with depth at {depth}...")
+    print(f"Analyzing {pgn_file} with node_limit at {nodes_limit}...")
     
+    #analysis = evaluate_game(pgn_file, depth, nodes_limit)
+
+    from analyze_games import get_game_from_pgn
+    
+    with open(pgn_file, 'r') as pgn_file:
+        pgn_content = pgn_file.read()
+
+    game = get_game_from_pgn(pgn_content)
+    analysis = evaluate_game_detailed(pgn_content, depth, nodes_limit)
+
+
+    # import pdb; pdb.set_trace()
+    print(analysis)
     # Print statistics
-    stats = get_game_statistics(analysis)
-    print("\nGame Statistics:")
-    print(f"White accuracy: {stats['white']['accuracy']:.1f}%")
-    print(f"Black accuracy: {stats['black']['accuracy']:.1f}%")
-    print(f"White avg. centipawn loss: {stats['white']['avg_centipawn_loss']:.2f}")
-    print(f"Black avg. centipawn loss: {stats['black']['avg_centipawn_loss']:.2f}")
+    # stats = get_game_statistics(analysis)
+    # print("\nGame Statistics:")
+    # print(f"White accuracy: {stats['white']['accuracy_per_move']}")
+    # print(f"Black accuracy: {stats['black']['accuracy_per_move']}")
+    # print(f"White best move percentage: {stats['white']['best_move_percentage']:.1f}%")
+    # print(f"Black best move percentage: {stats['black']['best_move_percentage']:.1f}%")

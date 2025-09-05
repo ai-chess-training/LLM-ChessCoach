@@ -377,7 +377,7 @@ Return ONLY a JSON array of commentary strings, one for each move, in the exact 
     
     return all_commentaries
 
-def analyze_game_combined(pgn_content: str, user_alias: str, stockfish_depth: int = 15, batch_size: int = 100) -> Optional[Dict[str, Any]]:
+def analyze_game_combined(pgn_content: str, user_alias: str, stockfish_depth: int = 18, batch_size: int = 140) -> Optional[Dict[str, Any]]:
     """Analyze a chess game by combining Stockfish evaluation with ChatGPT commentary."""
     game = get_game_from_pgn(pgn_content)
     if not game:
@@ -621,8 +621,8 @@ def save_analysis_results(analysis: Dict[str, Any], output_dir: str, game_name: 
     
     print(f"  Readable analysis saved to {text_file}")
 
-def analyze_games(pgn_folder: str, user_alias: str, stockfish_depth: int = 15, 
-                 max_workers: Optional[int] = None, batch_size: int = 100):
+def analyze_games(pgn_folder: str, user_alias: str, stockfish_depth: int = 18, 
+                 max_workers: Optional[int] = None, batch_size: int = 180):
     """Analyze a batch of chess games with combined Stockfish and ChatGPT analysis."""
     
     game_data = []
@@ -776,17 +776,17 @@ def main():
         epilog="""
 Examples:
   python analyze_game.py --pgn_folder ./games --user_alias "John Doe"
-  python analyze_game.py --pgn_folder ./games --user_alias "John Doe" --depth 20
-  python analyze_game.py --pgn_folder ./games --user_alias "John Doe" --workers 2
-  python analyze_game.py --pgn_folder ./games --user_alias "John Doe" --batch_size 50
+  python analyze_game.py --pgn_folder ./games --user_alias "John Doe" --depth 18
+  python analyze_game.py --pgn_folder ./games --user_alias "John Doe" --workers 1
+  python analyze_game.py --pgn_folder ./games --user_alias "John Doe" --batch_size 180
         """
     )
     parser.add_argument("--pgn_folder", required=True, help="Folder containing PGN files to analyze")
     parser.add_argument("--user_alias", required=True, help="User alias for personalized analysis")
-    parser.add_argument("--depth", type=int, default=15, help="Stockfish analysis depth (default: 15)")
+    parser.add_argument("--depth", type=int, default=18, help="Stockfish analysis depth (default: 18)")
     parser.add_argument("--workers", type=int, default=None, help="Number of parallel workers (default: auto)")
-    parser.add_argument("--batch_size", type=int, default=100, 
-                       help="Max moves per ChatGPT batch call (default: 100, use lower for very long games)")
+    parser.add_argument("--batch_size", type=int, default=180, 
+                       help="Max moves per ChatGPT batch call (default: 180)")
 
     args = parser.parse_args()
     
