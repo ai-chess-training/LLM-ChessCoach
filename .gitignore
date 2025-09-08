@@ -1,4 +1,6 @@
+.env
 games/
+samples/
 config.json
 __pycache__/
 chess-coach-venv/

@@ -32,9 +32,13 @@ class ChessGameDownloader:
         username = self.config['lichess_user_name']
         self.username = username
         lichess_api_url = f"{lichess_api_url}{username}?since={epoch_time}"
-        api_token = self.config['lichess_api_token']
+        # Prefer ENV token to avoid committing secrets
+        api_token = os.getenv('LICHESS_API_TOKEN', self.config.get('lichess_api_token', ''))
 
-        response = requests.get(lichess_api_url, headers={"Authorization": f"Bearer {api_token}"})
+        headers = {"Accept": "application/x-chess-pgn"}
+        if api_token:
+            headers["Authorization"] = f"Bearer {api_token}"
+        response = requests.get(lichess_api_url, headers=headers)
         
         if response.status_code == 200:
             games_text = response.text
