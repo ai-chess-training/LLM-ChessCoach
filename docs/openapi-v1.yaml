@@ -1,0 +1,89 @@
+openapi: 3.0.3
+info:
+  title: LLM Chess Coach API (v1)
+  version: 1.0.0
+servers:
+  - url: http://localhost:8000
+paths:
+  /v1/sessions:
+    post:
+      summary: Create a live session vs engine
+      parameters:
+        - in: query
+          name: skill_level
+          schema:
+            type: string
+            enum: [beginner, adv_beginner, intermediate, advanced, expert]
+          required: false
+      responses:
+        '200':
+          description: Session created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_id: { type: string }
+                  fen_start: { type: string }
+  /v1/sessions/{session_id}:
+    get:
+      summary: Get session snapshot
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Session data
+  /v1/sessions/{session_id}/move:
+    post:
+      summary: Play a move and get feedback
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: move
+          required: true
+          schema:
+            type: string
+            description: SAN or UCI move
+      responses:
+        '200':
+          description: Feedback
+  /v1/sessions/{session_id}/stream:
+    get:
+      summary: SSE stream of basic then extended feedback for a move
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: move
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: text/event-stream with events "basic" and "extended"
+  /v1/runs:
+    post:
+      summary: Analyze a PGN and return per-move feedback + summary
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                pgn:
+                  type: string
+                level:
+                  type: string
+                  enum: [beginner, adv_beginner, intermediate, advanced, expert]
+      responses:
+        '200':
+          description: Analysis summary and moves
+

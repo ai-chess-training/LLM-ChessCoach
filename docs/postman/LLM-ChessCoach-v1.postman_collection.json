@@ -1,0 +1,45 @@
+{
+  "info": {
+    "name": "LLM-ChessCoach v1",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Create Session",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{API_KEY}}" }
+        ],
+        "url": { "raw": "http://localhost:8000/v1/sessions?skill_level=intermediate", "protocol": "http", "host": ["localhost"], "port": "8000", "path": ["v1","sessions"], "query": [{"key":"skill_level","value":"intermediate"}] }
+      }
+    },
+    {
+      "name": "Play Move",
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Authorization", "value": "Bearer {{API_KEY}}" } ],
+        "url": { "raw": "http://localhost:8000/v1/sessions/{{session_id}}/move?move=e4", "protocol": "http", "host": ["localhost"], "port": "8000", "path": ["v1","sessions","{{session_id}}","move"], "query": [{"key":"move","value":"e4"}] }
+      }
+    },
+    {
+      "name": "Stream Move (SSE)",
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "Authorization", "value": "Bearer {{API_KEY}}" }, { "key":"Accept", "value":"text/event-stream" } ],
+        "url": { "raw": "http://localhost:8000/v1/sessions/{{session_id}}/stream?move=e4", "protocol": "http", "host": ["localhost"], "port": "8000", "path": ["v1","sessions","{{session_id}}","stream"], "query": [{"key":"move","value":"e4"}] }
+      }
+    },
+    {
+      "name": "Batch Run (PGN)",
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Authorization", "value": "Bearer {{API_KEY}}" }, {"key":"Content-Type","value":"application/x-www-form-urlencoded"} ],
+        "body": { "mode":"urlencoded", "urlencoded": [ {"key":"pgn","value":"[Event \\\"Test\\\"]\n\n1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 1-0"}, {"key":"level","value":"intermediate"} ] },
+        "url": { "raw": "http://localhost:8000/v1/runs", "protocol": "http", "host": ["localhost"], "port": "8000", "path": ["v1","runs"] }
+      }
+    }
+  ],
+  "variable": [ { "key": "API_KEY", "value": "change-me" }, { "key": "session_id", "value": "" } ]
+}
+
