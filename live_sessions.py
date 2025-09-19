@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional, Tuple, List
 
 import chess
 
-from stockfish_engine import StockfishAnalyzer, DEFAULT_MULTIPV, DEFAULT_NODES_PER_PV
+from stockfish_engine import StockfishAnalyzer, DEFAULT_MULTIPV, DEFAULT_NODES_PER_PV, SKILL_LEVEL_MAPPINGS
 from llm_coach import coach_move_with_llm, severity_from_cp_loss
 
 
@@ -12,23 +12,58 @@ class SessionManager:
     def __init__(self):
         self.sessions: Dict[str, Dict[str, Any]] = {}
 
-    def create(self, skill_level: str = "intermediate", start_fen: Optional[str] = None) -> Dict[str, Any]:
+    def create(self, skill_level: str = "intermediate", game_mode: str = "play", start_fen: Optional[str] = None) -> Dict[str, Any]:
         sid = str(uuid.uuid4())
         board = chess.Board(start_fen) if start_fen else chess.Board()
+
+        # Map skill level to Stockfish configuration
+        skill_config = SKILL_LEVEL_MAPPINGS.get(skill_level, SKILL_LEVEL_MAPPINGS["intermediate"])
+
         sess = {
             "id": sid,
             "skill_level": skill_level,
+            "game_mode": game_mode,  # "play" for interactive play, "training" for analysis only
+            "engine_skill_level": skill_config["skill_level"],
+            "engine_time_ms": skill_config["move_time_ms"],
             "created_at": time.time(),
             "board": board,
             "moves": [],  # list of move feedback dicts
         }
         self.sessions[sid] = sess
-        return {"session_id": sid, "fen_start": board.fen()}
+        return {
+            "session_id": sid,
+            "fen_start": board.fen(),
+            "game_mode": game_mode,
+            "skill_level": skill_level
+        }
 
     def get(self, sid: str) -> Dict[str, Any]:
         if sid not in self.sessions:
             raise KeyError("Session not found")
         return self.sessions[sid]
+
+    def _get_engine_move(self, sess: Dict[str, Any]) -> Dict[str, Any]:
+        """Get engine move for the current position."""
+        board: chess.Board = sess["board"]
+        skill_level = sess.get("engine_skill_level", 8)
+        time_ms = sess.get("engine_time_ms", 2000)
+
+        with StockfishAnalyzer(skill_level=skill_level) as analyzer:
+            engine_response = analyzer.get_engine_move(board, time_limit_ms=time_ms)
+
+        if engine_response.get("move_uci"):
+            # Parse the move
+            move = chess.Move.from_uci(engine_response["move_uci"])
+            # Apply the move to the board
+            board.push(move)
+
+            return {
+                "san": engine_response.get("move_san"),
+                "uci": engine_response.get("move_uci"),
+                "fen_after": board.fen(),
+                "score": engine_response.get("score", {})
+            }
+        return None
 
     def _parse_move(self, board: chess.Board, move_str: str) -> Tuple[Optional[chess.Move], Optional[str], Optional[str]]:
         # Try UCI first then SAN
@@ -131,7 +166,28 @@ class SessionManager:
         )
 
         sess["moves"].append(feedback)
-        return {"legal": True, "feedback": feedback}
+
+        # Get engine move if in play mode
+        engine_move = None
+        if sess.get("game_mode") == "play" and not board.is_game_over():
+            engine_move = self._get_engine_move(sess)
+            if engine_move:
+                # Store engine move in session history
+                engine_feedback = {
+                    "move_no": len(sess["moves"]),
+                    "side": "white" if board.turn == chess.BLACK else "black",  # After engine move
+                    "san": engine_move["san"],
+                    "uci": engine_move["uci"],
+                    "fen_after": engine_move["fen_after"],
+                    "is_engine_move": True
+                }
+                sess["moves"].append(engine_feedback)
+
+        return {
+            "legal": True,
+            "human_feedback": feedback,
+            "engine_move": engine_move
+        }
 
     def snapshot(self, sid: str) -> Dict[str, Any]:
         sess = self.get(sid)
@@ -139,8 +195,11 @@ class SessionManager:
         return {
             "session_id": sid,
             "skill_level": sess.get("skill_level"),
+            "game_mode": sess.get("game_mode", "training"),
             "fen": board.fen(),
             "moves": sess.get("moves", []),
+            "is_game_over": board.is_game_over(),
+            "turn": "white" if board.turn else "black"
         }
 
 

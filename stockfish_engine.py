@@ -14,6 +14,14 @@ STOCKFISH_PATH = os.getenv('STOCKFISH_PATH', 'stockfish')
 DEFAULT_MULTIPV = int(os.getenv('MULTIPV', '5'))
 DEFAULT_NODES_PER_PV = int(os.getenv('NODES_PER_PV', '1000000'))
 
+# Skill level mappings for different player levels
+SKILL_LEVEL_MAPPINGS = {
+    "beginner": {"skill_level": 3, "move_time_ms": 1000},
+    "intermediate": {"skill_level": 8, "move_time_ms": 2000},
+    "advanced": {"skill_level": 13, "move_time_ms": 3000},
+    "expert": {"skill_level": 18, "move_time_ms": 4000}
+}
+
 class StockfishAnalyzer:
     """Enhanced Stockfish analyzer for detailed position analysis (MultiPV support)."""
 
@@ -24,6 +32,7 @@ class StockfishAnalyzer:
         nodes_limit: int = 500_000,
         multipv: int = DEFAULT_MULTIPV,
         nodes_per_pv: int = DEFAULT_NODES_PER_PV,
+        skill_level: Optional[int] = None,
     ):
         """Initialize the Stockfish analyzer.
 
@@ -31,12 +40,14 @@ class StockfishAnalyzer:
         - nodes_limit: fallback nodes cap if multipv/nodes_per_pv not used
         - multipv: number of PVs to compute
         - nodes_per_pv: approximate nodes budget per PV (total nodes ≈ multipv * nodes_per_pv)
+        - skill_level: Stockfish skill level (0-20) for playing moves, None for analysis mode
         """
         self.engine_path = engine_path
         self.depth = depth
         self.nodes_limit = nodes_limit
         self.multipv = max(1, int(multipv))
         self.nodes_per_pv = max(10_000, int(nodes_per_pv))
+        self.skill_level = skill_level
         self.engine = None
         self.num_threads = min(8, os.cpu_count())
 
@@ -44,8 +55,12 @@ class StockfishAnalyzer:
     def __enter__(self):
         """Context manager entry - start the engine."""
         self.engine = chess.engine.SimpleEngine.popen_uci(self.engine_path)
-        # MultiPV is managed per-analyse call via multipv= argument; do not set here
-        self.engine.configure({"Threads": self.num_threads})
+        # Configure base settings
+        config = {"Threads": self.num_threads}
+        # Add skill level if specified (for playing mode)
+        if self.skill_level is not None:
+            config["Skill Level"] = max(0, min(20, self.skill_level))
+        self.engine.configure(config)
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -168,6 +183,74 @@ class StockfishAnalyzer:
                 'error': str(e)
             }
     
+    def get_engine_move(
+        self,
+        board: chess.Board,
+        time_limit_ms: Optional[int] = None,
+        depth: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Get engine's move for the current position at the configured skill level.
+
+        Args:
+            board: Current board position
+            time_limit_ms: Time limit in milliseconds for the move
+            depth: Optional depth limit
+
+        Returns:
+            Dictionary containing:
+            - move_uci: The move in UCI format
+            - move_san: The move in SAN format
+            - score: Evaluation after the move
+        """
+        if not self.engine:
+            raise RuntimeError("Engine not initialized. Use within context manager.")
+
+        # Use time limit if provided, otherwise use depth
+        if time_limit_ms:
+            limit = chess.engine.Limit(time=time_limit_ms / 1000.0)
+        elif depth:
+            limit = chess.engine.Limit(depth=depth)
+        else:
+            # Default: 2 seconds for move selection at skill level
+            limit = chess.engine.Limit(time=2.0)
+
+        try:
+            result = self.engine.play(board, limit)
+            move = result.move
+
+            # Get the move in SAN format
+            move_san = board.san(move) if move else None
+            move_uci = move.uci() if move else None
+
+            # Get evaluation info if available
+            score_dict = {}
+            if hasattr(result, 'info') and result.info:
+                score = result.info.get('score')
+                if score:
+                    if score.is_mate():
+                        score_dict['mate'] = score.white().mate()
+                    else:
+                        cp_score = score.white().score()
+                        score_dict['cp'] = cp_score if cp_score is not None else 0
+
+            return {
+                'move_uci': move_uci,
+                'move_san': move_san,
+                'score': score_dict,
+                'skill_level': self.skill_level
+            }
+
+        except Exception as e:
+            print(f"Error getting engine move: {e}")
+            return {
+                'move_uci': None,
+                'move_san': None,
+                'score': {'cp': 0},
+                'skill_level': self.skill_level,
+                'error': str(e)
+            }
+
     def compare_move(
         self,
         board: chess.Board,

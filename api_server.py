@@ -102,9 +102,13 @@ async def dashboard(username: str):
 # --------------------
 
 @app.post("/v1/sessions")
-async def create_session(skill_level: str = "intermediate", authorization: Optional[str] = Header(None)):
+async def create_session(
+    skill_level: str = "intermediate",
+    game_mode: str = "play",
+    authorization: Optional[str] = Header(None)
+):
     require_auth(authorization)
-    return session_manager.create(skill_level=skill_level)
+    return session_manager.create(skill_level=skill_level, game_mode=game_mode)
 
 
 @app.get("/v1/sessions/{session_id}")
@@ -123,7 +127,14 @@ async def play_move(session_id: str, move: str, authorization: Optional[str] = H
         result = session_manager.apply_move(session_id, move)
         if not result.get("legal"):
             raise HTTPException(status_code=400, detail=result.get("error", "Illegal move"))
-        return result
+
+        # Return structured response with human feedback and engine move (if applicable)
+        response = {
+            "legal": True,
+            "human_feedback": result.get("human_feedback"),
+            "engine_move": result.get("engine_move")
+        }
+        return response
     except KeyError:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -235,6 +246,40 @@ async def stream_move(session_id: str, move: str, authorization: Optional[str] =
         sess["moves"].append(full_payload)
 
         yield f"event: extended\ndata: {json.dumps(full_payload)}\n\n"
+
+        # Get engine move if in play mode
+        if sess.get("game_mode") == "play" and not board.is_game_over():
+            from stockfish_engine import SKILL_LEVEL_MAPPINGS
+            skill_config = SKILL_LEVEL_MAPPINGS.get(sess.get("skill_level", "intermediate"))
+
+            with StockfishAnalyzer(skill_level=skill_config["skill_level"]) as analyzer:
+                engine_response = analyzer.get_engine_move(board, time_limit_ms=skill_config["move_time_ms"])
+
+            if engine_response.get("move_uci"):
+                # Apply engine move
+                engine_move = chess.Move.from_uci(engine_response["move_uci"])
+                board.push(engine_move)
+
+                engine_payload = {
+                    "san": engine_response.get("move_san"),
+                    "uci": engine_response.get("move_uci"),
+                    "fen_after": board.fen(),
+                    "score": engine_response.get("score", {}),
+                    "skill_level": skill_config["skill_level"]
+                }
+
+                # Store engine move in session
+                engine_feedback = {
+                    "move_no": len(sess["moves"]),
+                    "side": "white" if board.turn == chess.BLACK else "black",
+                    "san": engine_response.get("move_san"),
+                    "uci": engine_response.get("move_uci"),
+                    "fen_after": board.fen(),
+                    "is_engine_move": True
+                }
+                sess["moves"].append(engine_feedback)
+
+                yield f"event: engine_move\ndata: {json.dumps(engine_payload)}\n\n"
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 

@@ -1,8 +1,10 @@
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Dict, Any
 from pydantic import BaseModel, Field
 
 
 Severity = Literal["best", "good", "inaccuracy", "mistake", "blunder"]
+GameMode = Literal["play", "training"]
+SkillLevel = Literal["beginner", "intermediate", "advanced", "expert"]
 
 
 class MultiPVEntry(BaseModel):
@@ -42,6 +44,31 @@ class MoveFeedback(BaseModel):
     extended: Optional[str] = None  # <=100 words
     tags: List[str] = Field(default_factory=list)
     drills: List[Drill] = Field(default_factory=list)
+
+
+class EngineMove(BaseModel):
+    san: str
+    uci: str
+    fen_after: str
+    score: Dict[str, Any] = Field(default_factory=dict)
+    skill_level: Optional[int] = None
+
+
+class MoveResponse(BaseModel):
+    legal: bool
+    human_feedback: Optional[MoveFeedback] = None
+    engine_move: Optional[EngineMove] = None
+    error: Optional[str] = None
+
+
+class SessionInfo(BaseModel):
+    session_id: str
+    skill_level: SkillLevel
+    game_mode: GameMode
+    fen: str
+    moves: List[MoveFeedback] = Field(default_factory=list)
+    is_game_over: bool = False
+    turn: Literal["white", "black"]
 
 
 class GameSummary(BaseModel):
