@@ -1,6 +1,53 @@
 import os
 import json
+import logging
+import time
 from typing import Dict, Any, List, Optional
+
+from env_loader import load_env
+
+load_env()
+
+
+logger = logging.getLogger(__name__)
+_MISSING_KEY_LOGGED = False
+LLM_DEBUG_ENABLED = os.getenv("LLM_DEBUG") == "1"
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+LLM_REQUEST_TIMEOUT_SECONDS = max(0.5, _env_float("LLM_TIMEOUT_SECONDS", _env_float("LLM_TIMEOUT", 8.0)))
+LLM_TOTAL_TIMEOUT_SECONDS = max(LLM_REQUEST_TIMEOUT_SECONDS, _env_float("LLM_TOTAL_TIMEOUT_SECONDS", 12.0))
+
+
+def _log_llm_event(message: str, exc: Optional[Exception] = None) -> None:
+    """Log warnings for LLM fallbacks with optional stderr mirroring."""
+    if LLM_DEBUG_ENABLED:
+        if exc:
+            print(f"{message}: {exc}")
+        else:
+            print(message)
+    if exc:
+        logger.warning(message, exc_info=exc)
+    else:
+        logger.warning(message)
+
+
+def _log_missing_key() -> None:
+    global _MISSING_KEY_LOGGED
+    if _MISSING_KEY_LOGGED:
+        return
+    _MISSING_KEY_LOGGED = True
+    _log_llm_event("OPENAI_API_KEY not set; using rule-based coaching fallback.")
 
 
 def _truncate_words(text: str, max_words: int) -> str:
@@ -83,13 +130,9 @@ def coach_move_with_llm(move: Dict[str, Any], level: str = "intermediate", use_l
 
     move: dict with fields (san, cp_loss, best_move_san, multipv[], fen_before, side, ...)
     """
-    api_key = os.getenv("OPENAI_API_KEY")
-    # Enforce GPT-5-Nano or better by default
-    env_model = os.getenv("OPENAI_MODEL")
-    if env_model and ("gpt-5" in env_model.lower() or "gpt5" in env_model.lower()):
-        model = env_model
-    else:
-        model = "gpt-5-nano"
+    API_KEY = os.getenv("AI_API_KEY")
+    API_ENDPOINT = os.getenv("AI_API_ENDPOINT")
+    MODEL_NAME = os.getenv("AI_MODEL_NAME")
 
     # Always build safe defaults
     result = {
@@ -100,212 +143,77 @@ def coach_move_with_llm(move: Dict[str, Any], level: str = "intermediate", use_l
         "source": "rules",
     }
 
-    if not use_llm or not api_key:
+    if not use_llm:
         return result
 
+    if not API_KEY:
+        _log_missing_key()
+        return result
+
+    from openai import OpenAI
+
+    # Instantiate client without kwargs for broader compatibility across SDK versions
+    openai_client = OpenAI(
+        api_key=API_KEY,
+        base_url=API_ENDPOINT,
+    )
+    structured = {
+        "san": move.get("san"),
+        "best_move_san": move.get("best_move_san"),
+        "cp_loss": move.get("cp_loss"),
+        "side": move.get("side"),
+        "multipv": move.get("multipv", []),
+    }
+
+    prompt = (
+        "You are a concise chess coach. Given a move and engine data, "
+        "return JSON with: basic (<=15 words), extended (<=100 words), "
+        "tags (array), and drills (array of {objective, best_line_san}). "
+        f"Player level: {level}. Ground advice in PV; do not contradict engine.\n\n"
+        f"Data:\n{json.dumps(structured)}\n\n"
+        "Return only a JSON object with keys: basic, extended, tags, drills."
+    )
+
+
+    last_err: Optional[Exception] = None
     try:
-        from openai import OpenAI
-
-        # Instantiate client without kwargs for broader compatibility across SDK versions
-        client = OpenAI()
-        structured = {
-            "san": move.get("san"),
-            "best_move_san": move.get("best_move_san"),
-            "cp_loss": move.get("cp_loss"),
-            "side": move.get("side"),
-            "multipv": move.get("multipv", []),
-        }
-
-        prompt = (
-            "You are a concise chess coach. Given a move and engine data, "
-            "return JSON with: basic (<=15 words), extended (<=100 words), "
-            "tags (array), and drills (array of {objective, best_line_san}). "
-            f"Player level: {level}. Ground advice in PV; do not contradict engine.\n\n"
-            f"Data:\n{json.dumps(structured)}\n\n"
-            "Return only a JSON object with keys: basic, extended, tags, drills."
+        completion = openai_client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": "You are a concise chess coach that outputs strict JSON."},
+                {"role": "user", "content": prompt},
+            ],
         )
-
-        # Try a list of acceptable models in order
-        models_to_try: List[str] = []
-        if env_model and ("gpt-5" in env_model.lower() or "gpt5" in env_model.lower()):
-            models_to_try.append(env_model)
-        # Always include defaults that satisfy 'GPT-5 or better'
-        if "gpt-5-nano" not in models_to_try:
-            models_to_try.append("gpt-5-nano")
-        if "gpt-5" not in models_to_try:
-            models_to_try.append("gpt-5")
-
-        last_err: Optional[Exception] = None
-        for m in models_to_try:
-            try:
-                completion = client.chat.completions.create(
-                    model=m,
-                    messages=[
-                        {"role": "system", "content": "You are a concise chess coach that outputs strict JSON."},
-                        {"role": "user", "content": prompt},
-                    ],
-                )
-                content = completion.choices[0].message.content.strip()
-                if content.startswith("```json"):
-                    content = content[7:]
-                if content.startswith("```"):
-                    content = content[3:]
-                if content.endswith("```"):
-                    content = content[:-3]
-                obj = json.loads(content)
-                # Enforce length limits
-                obj["basic"] = _truncate_words(obj.get("basic", result["basic"]) or result["basic"], 15)
-                obj["extended"] = _truncate_words(obj.get("extended", result["extended"]) or result["extended"], 100)
-                drills = obj.get("drills") or []
-                # Normalize drills structure
-                normalized_drills = []
-                for d in drills[:2]:
-                    normalized_drills.append(
-                        {
-                            "fen": move.get("fen_before"),
-                            "side_to_move": move.get("side"),
-                            "objective": d.get("objective") or "Find the best continuation",
-                            "best_line_san": d.get("best_line_san") or [],
-                            "alt_traps_san": d.get("alt_traps_san") or [],
-                        }
-                    )
-                obj["drills"] = normalized_drills or result["drills"]
-                obj["tags"] = obj.get("tags") or []
-                obj["source"] = "llm"
-                return obj
-            except Exception as e:
-                last_err = e
-                if os.getenv("LLM_DEBUG") == "1":
-                    print(f"LLM call failed for model {m}: {e}")
-                continue
-        if os.getenv("LLM_DEBUG") == "1" and last_err:
-            print(f"LLM fallback to rules due to error: {last_err}")
-        return result
-    except Exception as outer:
-        # Try legacy OpenAI 0.x SDK path
-        if os.getenv("LLM_DEBUG") == "1":
-            print(f"LLM setup failed (v1 path): {outer}")
-        try:
-            import openai as legacy
-            legacy.api_key = api_key
-
-            structured = {
-                "san": move.get("san"),
-                "best_move_san": move.get("best_move_san"),
-                "cp_loss": move.get("cp_loss"),
-                "side": move.get("side"),
-                "multipv": move.get("multipv", []),
-            }
-            prompt = (
-                "You are a concise chess coach. Given a move and engine data, "
-                "return JSON with: basic (<=15 words), extended (<=100 words), "
-                "tags (array), and drills (array of {objective, best_line_san}). "
-                f"Player level: {level}. Ground advice in PV; do not contradict engine.\n\n"
-                f"Data:\n{json.dumps(structured)}\n\n"
-                "Return only a JSON object with keys: basic, extended, tags, drills."
+        content = completion.choices[0].message.content.strip()
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        obj = json.loads(content)
+        # Enforce length limits
+        obj["basic"] = _truncate_words(obj.get("basic", result["basic"]) or result["basic"], 15)
+        obj["extended"] = _truncate_words(obj.get("extended", result["extended"]) or result["extended"], 100)
+        drills = obj.get("drills") or []
+        # Normalize drills structure
+        normalized_drills = []
+        for d in drills[:2]:
+            normalized_drills.append(
+                {
+                    "fen": move.get("fen_before"),
+                    "side_to_move": move.get("side"),
+                    "objective": d.get("objective") or "Find the best continuation",
+                    "best_line_san": d.get("best_line_san") or [],
+                    "alt_traps_san": d.get("alt_traps_san") or [],
+                }
             )
-            resp = legacy.ChatCompletion.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "You are a concise chess coach that outputs strict JSON."},
-                    {"role": "user", "content": prompt},
-                ],
-                timeout=10,
-            )
-            choice = resp["choices"][0]
-            message = choice.get("message") or choice["message"]
-            content = message.get("content") if isinstance(message, dict) else message["content"]
-            content = (content or "").strip()
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.startswith("```"):
-                content = content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
-            obj = json.loads(content)
-            obj["basic"] = _truncate_words(obj.get("basic", result["basic"]) or result["basic"], 15)
-            obj["extended"] = _truncate_words(obj.get("extended", result["extended"]) or result["extended"], 100)
-            drills = obj.get("drills") or []
-            normalized_drills = []
-            for d in drills[:2]:
-                normalized_drills.append(
-                    {
-                        "fen": move.get("fen_before"),
-                        "side_to_move": move.get("side"),
-                        "objective": d.get("objective") or "Find the best continuation",
-                        "best_line_san": d.get("best_line_san") or [],
-                        "alt_traps_san": d.get("alt_traps_san") or [],
-                    }
-                )
-            obj["drills"] = normalized_drills or result["drills"]
-            obj["tags"] = obj.get("tags") or []
-            obj["source"] = "llm"
-            return obj
-        except Exception as legacy_err:
-            if os.getenv("LLM_DEBUG") == "1":
-                print(f"LLM setup failed (legacy path): {legacy_err}")
-            # Final HTTP fallback to chat completions API
-            try:
-                import requests
-                url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1/chat/completions")
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                }
-                structured = {
-                    "san": move.get("san"),
-                    "best_move_san": move.get("best_move_san"),
-                    "cp_loss": move.get("cp_loss"),
-                    "side": move.get("side"),
-                    "multipv": move.get("multipv", []),
-                }
-                prompt = (
-                    "You are a concise chess coach. Given a move and engine data, "
-                    "return JSON with: basic (<=15 words), extended (<=100 words), "
-                    "tags (array), and drills (array of {objective, best_line_san}). "
-                    f"Player level: {level}. Ground advice in PV; do not contradict engine.\n\n"
-                    f"Data:\n{json.dumps(structured)}\n\n"
-                    "Return only a JSON object with keys: basic, extended, tags, drills."
-                )
-                payload = {
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": "You are a concise chess coach that outputs strict JSON."},
-                        {"role": "user", "content": prompt},
-                    ],
-                }
-                resp = requests.post(url, headers=headers, json=payload, timeout=15)
-                if os.getenv("LLM_DEBUG") == "1":
-                    print(f"HTTP LLM status {resp.status_code}")
-                resp.raise_for_status()
-                data = resp.json()
-                content = data["choices"][0]["message"]["content"].strip()
-                if content.startswith("```json"):
-                    content = content[7:]
-                if content.startswith("```"):
-                    content = content[3:]
-                if content.endswith("```"):
-                    content = content[:-3]
-                obj = json.loads(content)
-                obj["basic"] = _truncate_words(obj.get("basic", result["basic"]) or result["basic"], 15)
-                obj["extended"] = _truncate_words(obj.get("extended", result["extended"]) or result["extended"], 100)
-                drills = obj.get("drills") or []
-                normalized_drills = []
-                for d in drills[:2]:
-                    normalized_drills.append(
-                        {
-                            "fen": move.get("fen_before"),
-                            "side_to_move": move.get("side"),
-                            "objective": d.get("objective") or "Find the best continuation",
-                            "best_line_san": d.get("best_line_san") or [],
-                            "alt_traps_san": d.get("alt_traps_san") or [],
-                        }
-                    )
-                obj["drills"] = normalized_drills or result["drills"]
-                obj["tags"] = obj.get("tags") or []
-                obj["source"] = "llm"
-                return obj
-            except Exception as http_err:
-                if os.getenv("LLM_DEBUG") == "1":
-                    print(f"LLM setup failed (http path): {http_err}")
-                return result
+        obj["drills"] = normalized_drills or result["drills"]
+        obj["tags"] = obj.get("tags") or []
+        obj["source"] = "llm"
+        return obj
+    except Exception as e:
+        last_err = e
+    if last_err:
+        _log_llm_event("LLM fallback to rules after attempting LLM model", last_err)
+    return result

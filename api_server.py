@@ -11,6 +11,10 @@ import json
 import uuid
 import asyncio
 
+from env_loader import load_env
+
+load_env()
+
 from live_sessions import session_manager
 from analysis_pipeline import analyze_pgn_to_feedback
 from fastapi import Form
@@ -231,8 +235,13 @@ async def stream_move(session_id: str, move: str, authorization: Optional[str] =
             "multipv": multipv,
         }
 
+        print(full_payload)
+
         level = sess.get("skill_level", "intermediate")
         coach = coach_move_with_llm(full_payload, level=level)
+
+        print(coach)
+
         full_payload.update(
             {
                 "basic": coach.get("basic"),

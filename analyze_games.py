@@ -12,6 +12,21 @@ from typing import Dict, List, Any, Optional
 import time
 from datetime import datetime
 
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+LLM_DEBUG_ENABLED = os.getenv("LLM_DEBUG") == "1"
+LLM_REQUEST_TIMEOUT_SECONDS = max(0.5, _env_float("LLM_TIMEOUT_SECONDS", _env_float("LLM_TIMEOUT", 8.0)))
+
 # Import the enhanced stockfish engine
 from stockfish_engine import (
     StockfishAnalyzer, 
@@ -335,16 +350,33 @@ Return ONLY a JSON array of commentary strings, one for each move, in the exact 
 ]
 """
 
-        completion = client.chat.completions.create(
-            model="gpt-5-nano",
-            messages=[
-                {"role": "system", "content": "You are a chess instructor. Return ONLY a valid JSON array of commentary strings."},
-                {"role": "user", "content": prompt}
-            ],
-        )
-        
-        response = completion.choices[0].message.content.strip()
-        
+        start_ts = time.monotonic()
+        try:
+            completion = client.chat.completions.create(
+                model="gpt-5-nano",
+                messages=[
+                    {"role": "system", "content": "You are a chess instructor. Return ONLY a valid JSON array of commentary strings."},
+                    {"role": "user", "content": prompt}
+                ],
+                timeout=LLM_REQUEST_TIMEOUT_SECONDS,
+            )
+            response = completion.choices[0].message.content.strip()
+            elapsed = time.monotonic() - start_ts
+            if LLM_DEBUG_ENABLED:
+                print(
+                    f"LLM commentary batch {batch_start + 1}-{batch_end} succeeded in {elapsed:.2f}s (timeout {LLM_REQUEST_TIMEOUT_SECONDS:.2f}s)."
+                )
+        except Exception as call_err:
+            elapsed = time.monotonic() - start_ts
+            print(
+                f"Error calling OpenAI for commentary batch {batch_start + 1}-{batch_end} after {elapsed:.2f}s: {call_err}"
+            )
+            all_commentaries.extend([
+                f"Move {pos['move_number']}: Analysis unavailable due to LLM error."
+                for pos in batch_positions
+            ])
+            continue
+
         # Parse the JSON response
         try:
             # Clean the response if needed (remove markdown code blocks if present)
@@ -564,14 +596,27 @@ Please provide:
 
 Make your advice actionable and encouraging while being honest about areas for improvement."""
     
-    completion = client.chat.completions.create(
-        model="gpt-5-nano",
-        messages=[
-            {"role": "system", "content": "You are an experienced chess coach providing comprehensive, actionable improvement advice."},
-            {"role": "user", "content": prompt}
-        ],
-    )
-    return stats_summary + "\n" + completion.choices[0].message.content
+    start_ts = time.monotonic()
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-5-nano",
+            messages=[
+                {"role": "system", "content": "You are an experienced chess coach providing comprehensive, actionable improvement advice."},
+                {"role": "user", "content": prompt}
+            ],
+            timeout=LLM_REQUEST_TIMEOUT_SECONDS,
+        )
+        elapsed = time.monotonic() - start_ts
+        if LLM_DEBUG_ENABLED:
+            print(
+                f"Overall LLM analysis succeeded in {elapsed:.2f}s (timeout {LLM_REQUEST_TIMEOUT_SECONDS:.2f}s)."
+            )
+        return stats_summary + "\n" + completion.choices[0].message.content
+    except Exception as call_err:
+        elapsed = time.monotonic() - start_ts
+        print(f"Error calling OpenAI for overall analysis after {elapsed:.2f}s: {call_err}")
+        fallback = "Overall coaching summary unavailable due to LLM error."
+        return stats_summary + "\n" + fallback
 
 def save_analysis_results(analysis: Dict[str, Any], output_dir: str, game_name: str):
     """Save analysis results in multiple formats."""

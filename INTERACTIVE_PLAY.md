@@ -14,10 +14,10 @@ The system supports four skill levels, each mapped to specific Stockfish configu
 
 | Level         | Stockfish Skill | Move Time (ms) | Description                  |
 |---------------|-----------------|----------------|------------------------------|
-| `beginner`    | 3               | 1000           | Suitable for new players     |
-| `intermediate`| 8               | 2000           | For developing players       |
-| `advanced`    | 13              | 3000           | For strong club players      |
-| `expert`      | 18              | 4000           | Near maximum strength        |
+| `beginner`    | 3               | 150            | Suitable for new players     |
+| `intermediate`| 8               | 250            | For developing players       |
+| `advanced`    | 13              | 400            | For strong club players      |
+| `expert`      | 18              | 800            | Near maximum strength        |
 
 ## API Usage
 

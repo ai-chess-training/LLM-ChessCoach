@@ -4,6 +4,10 @@ from typing import Dict, Any, Optional, Tuple, List
 
 import chess
 
+from env_loader import load_env
+
+load_env()
+
 from stockfish_engine import StockfishAnalyzer, DEFAULT_MULTIPV, DEFAULT_NODES_PER_PV, SKILL_LEVEL_MAPPINGS
 from llm_coach import coach_move_with_llm, severity_from_cp_loss
 
