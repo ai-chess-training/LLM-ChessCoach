@@ -125,7 +125,7 @@ def make_drills(move: Dict[str, Any]) -> List[Dict[str, Any]]:
     return drills
 
 
-def coach_move_with_llm(move: Dict[str, Any], level: str = "intermediate", use_llm: bool = True) -> Dict[str, Any]:
+async def coach_move_with_llm(move: Dict[str, Any], level: str = "intermediate", use_llm: bool = True) -> Dict[str, Any]:
     """Attempt to get LLM-generated basic/extended and drills. Fallback to rules on error.
 
     move: dict with fields (san, cp_loss, best_move_san, multipv[], fen_before, side, ...)
@@ -150,10 +150,10 @@ def coach_move_with_llm(move: Dict[str, Any], level: str = "intermediate", use_l
         _log_missing_key()
         return result
 
-    from openai import OpenAI
+    from openai import AsyncOpenAI
 
-    # Instantiate client without kwargs for broader compatibility across SDK versions
-    openai_client = OpenAI(
+    # Instantiate async client
+    openai_client = AsyncOpenAI(
         api_key=API_KEY,
         base_url=API_ENDPOINT,
     )
@@ -177,7 +177,7 @@ def coach_move_with_llm(move: Dict[str, Any], level: str = "intermediate", use_l
 
     last_err: Optional[Exception] = None
     try:
-        completion = openai_client.chat.completions.create(
+        completion = await openai_client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
                 {"role": "system", "content": "You are a concise chess coach that outputs strict JSON."},

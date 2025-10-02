@@ -93,7 +93,7 @@ class SessionManager:
         uci = move.uci()
         return move, san, uci
 
-    def apply_move(self, sid: str, move_str: str) -> Dict[str, Any]:
+    async def apply_move(self, sid: str, move_str: str) -> Dict[str, Any]:
         sess = self.get(sid)
         board: chess.Board = sess["board"]
         move, san, uci = self._parse_move(board, move_str)
@@ -158,7 +158,7 @@ class SessionManager:
 
         # Coach via LLM (with rule-based fallback)
         level = sess.get("skill_level", "intermediate")
-        coach = coach_move_with_llm(feedback, level=level)
+        coach = await coach_move_with_llm(feedback, level=level)
         feedback.update(
             {
                 "basic": coach.get("basic"),

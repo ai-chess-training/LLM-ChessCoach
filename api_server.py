@@ -128,7 +128,7 @@ async def get_session(session_id: str, authorization: Optional[str] = Header(Non
 async def play_move(session_id: str, move: str, authorization: Optional[str] = Header(None)):
     require_auth(authorization)
     try:
-        result = session_manager.apply_move(session_id, move)
+        result = await session_manager.apply_move(session_id, move)
         if not result.get("legal"):
             raise HTTPException(status_code=400, detail=result.get("error", "Illegal move"))
 
@@ -238,7 +238,7 @@ async def stream_move(session_id: str, move: str, authorization: Optional[str] =
         print(full_payload)
 
         level = sess.get("skill_level", "intermediate")
-        coach = coach_move_with_llm(full_payload, level=level)
+        coach = await coach_move_with_llm(full_payload, level=level)
 
         print(coach)
 
@@ -300,7 +300,7 @@ async def run_batch_analysis(
     authorization: Optional[str] = Header(None),
 ):
     require_auth(authorization)
-    summary = analyze_pgn_to_feedback(pgn, level=level)
+    summary = await analyze_pgn_to_feedback(pgn, level=level)
     if not summary:
         raise HTTPException(status_code=400, detail="Invalid or empty PGN")
     return summary

@@ -1,5 +1,6 @@
 from typing import Dict, Any, List, Optional
 import io
+import asyncio
 import chess
 import chess.pgn
 
@@ -15,7 +16,7 @@ def _safe_read_game(pgn: str) -> Optional[chess.pgn.Game]:
         return None
 
 
-def analyze_pgn_to_feedback(
+async def analyze_pgn_to_feedback(
     pgn_content: str,
     level: str = "intermediate",
     max_plies: Optional[int] = None,
@@ -66,7 +67,7 @@ def analyze_pgn_to_feedback(
             }
             # Decide whether to invoke LLM for this move
             enable_for_move = use_llm and (llm_mode == "all" or payload["severity"] in ("mistake", "blunder"))
-            coach = coach_move_with_llm(payload, level=level, use_llm=enable_for_move)
+            coach = await coach_move_with_llm(payload, level=level, use_llm=enable_for_move)
             payload.update(
                 {
                     "basic": coach.get("basic"),
