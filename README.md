@@ -63,7 +63,49 @@ python3 scripts/run_luna_analysis.py --raw_dir samples/luna/raw --out_dir sample
 
 ## Deployment
 
-Task : Fill this out.
+### Ubuntu VPS Deployment (Production)
+
+For production deployment to an Ubuntu VPS (OVHCloud, DigitalOcean, Linode, etc.), see the comprehensive [DEPLOYMENT.md](DEPLOYMENT.md) guide.
+
+#### Quick Start
+
+1. **Automated Setup**:
+   ```bash
+   sudo bash scripts/setup_ubuntu_vps.sh
+   ```
+
+2. **Configure Environment**:
+   ```bash
+   cp .env.example .env
+   nano .env  # Set API_KEY, OPENAI_API_KEY, ALLOWED_ORIGINS
+   ```
+
+3. **Set Up SSL** (with domain):
+   ```bash
+   sudo bash scripts/setup_ssl.sh yourdomain.com your-email@example.com
+   ```
+
+4. **Harden Security**:
+   ```bash
+   sudo bash scripts/harden_server.sh
+   ```
+
+5. **Start Application**:
+   ```bash
+   sudo systemctl start llm-chess-coach.service
+   sudo systemctl enable llm-chess-coach.service
+   ```
+
+The application includes:
+- ✅ Automated Ubuntu VPS setup
+- ✅ Nginx reverse proxy with SSL/TLS
+- ✅ Systemd service management
+- ✅ Security hardening (fail2ban, firewall, SSH hardening)
+- ✅ Rate limiting and CORS protection
+- ✅ Structured logging and monitoring
+- ✅ Automatic backups and log rotation
+
+For detailed instructions, troubleshooting, and security best practices, see [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Contributing
 Contributions are welcome. Please read the contributing guidelines first.

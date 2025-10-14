@@ -130,9 +130,10 @@ async def coach_move_with_llm(move: Dict[str, Any], level: str = "intermediate",
 
     move: dict with fields (san, cp_loss, best_move_san, multipv[], fen_before, side, ...)
     """
-    API_KEY = os.getenv("AI_API_KEY")
-    API_ENDPOINT = os.getenv("AI_API_ENDPOINT")
-    MODEL_NAME = os.getenv("AI_MODEL_NAME")
+    # Use OPENAI_API_KEY consistently
+    API_KEY = os.getenv("OPENAI_API_KEY")
+    API_ENDPOINT = os.getenv("OPENAI_API_ENDPOINT", "https://api.openai.com/v1")
+    MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4")
 
     # Always build safe defaults
     result = {

@@ -1,7 +1,13 @@
-from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status, Header
+from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from typing import Optional
+import logging
+import time
+from pythonjsonlogger import jsonlogger
+
 try:
     from export_lichess_games import ChessGameDownloader
 except Exception:  # pragma: no cover - optional legacy dependency for v1 tests
@@ -18,34 +24,177 @@ load_env()
 from live_sessions import session_manager
 from analysis_pipeline import analyze_pgn_to_feedback
 from fastapi import Form
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
-app = FastAPI(title="LLM Chess Coach API")
+# Configure structured logging
+log_handler = logging.StreamHandler()
+formatter = jsonlogger.JsonFormatter('%(asctime)s %(name)s %(levelname)s %(message)s %(request_id)s')
+log_handler.setFormatter(formatter)
+logger = logging.getLogger(__name__)
+logger.addHandler(log_handler)
+logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+
+# Environment validation
+def validate_environment():
+    """Validate required environment variables on startup."""
+    required_vars = []
+    optional_vars = ["OPENAI_API_KEY", "OPENAI_MODEL", "ALLOWED_ORIGINS"]
+
+    # In production, API_KEY is required
+    is_production = os.getenv("ENVIRONMENT", "development") == "production"
+    if is_production:
+        required_vars.append("API_KEY")
+
+    missing = [var for var in required_vars if not os.getenv(var)]
+    if missing:
+        error_msg = f"Missing required environment variables: {', '.join(missing)}"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
+
+    # Log warnings for optional but recommended vars
+    for var in optional_vars:
+        if not os.getenv(var):
+            logger.warning(f"Optional environment variable not set: {var}")
+
+    logger.info("Environment validation passed", extra={"request_id": "startup"})
+
+validate_environment()
+
+# Initialize rate limiter
+limiter = Limiter(key_func=get_remote_address)
+
+app = FastAPI(
+    title="LLM Chess Coach API",
+    version="1.0.0",
+    docs_url="/docs" if os.getenv("ENVIRONMENT") != "production" else None,
+    redoc_url="/redoc" if os.getenv("ENVIRONMENT") != "production" else None
+)
+
+# Add rate limiting
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Configure CORS with restricted origins
+allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "*")
+allowed_origins = [origin.strip() for origin in allowed_origins_str.split(",")] if allowed_origins_str != "*" else ["*"]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    max_age=600,
 )
+
+# Security headers middleware
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Add request ID for tracing
+        request_id = str(uuid.uuid4())
+        request.state.request_id = request_id
+
+        # Process request with timing
+        start_time = time.time()
+        response = await call_next(request)
+        process_time = time.time() - start_time
+
+        # Add security headers
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Process-Time"] = str(process_time)
+
+        # Log request
+        logger.info(
+            f"{request.method} {request.url.path}",
+            extra={
+                "request_id": request_id,
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": response.status_code,
+                "process_time": process_time,
+                "client_host": request.client.host if request.client else None,
+            }
+        )
+
+        return response
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 downloader = ChessGameDownloader() if ChessGameDownloader else None
 
-
-# --- Simple Auth (MVP): Bearer token ---
+# --- Bearer Token Authentication ---
 API_KEY = os.getenv("API_KEY")
-
+IS_PRODUCTION = os.getenv("ENVIRONMENT", "development") == "production"
 
 def require_auth(authorization: Optional[str] = None):
+    """Require bearer token authentication."""
     if not API_KEY:
-        # If no API key configured, allow for local dev
+        if IS_PRODUCTION:
+            logger.error("API_KEY not configured in production", extra={"request_id": "auth"})
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Server configuration error"
+            )
+        # Allow in development if no key configured
         return
+
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
-    token = authorization.split(" ", 1)[1].strip()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or invalid authorization header",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
+    try:
+        token = authorization.split(" ", 1)[1].strip()
+    except IndexError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authorization header format",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
     if token != API_KEY:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token")
+        logger.warning("Invalid API key attempt", extra={"request_id": "auth"})
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid API key"
+        )
     return
+
+# Health check endpoints
+@app.get("/health", tags=["Health"])
+async def health_check():
+    """Basic health check endpoint."""
+    return {"status": "healthy", "timestamp": time.time()}
+
+@app.get("/ready", tags=["Health"])
+async def readiness_check():
+    """Readiness check - validates critical dependencies."""
+    checks = {
+        "api": "ok",
+        "stockfish": "ok",
+    }
+
+    # Check if stockfish is available
+    stockfish_path = os.getenv("STOCKFISH_PATH", "stockfish")
+    import shutil
+    if not shutil.which(stockfish_path):
+        checks["stockfish"] = "unavailable"
+
+    all_ok = all(v == "ok" for v in checks.values())
+    status_code = 200 if all_ok else 503
+
+    return JSONResponse(
+        status_code=status_code,
+        content={"status": "ready" if all_ok else "not_ready", "checks": checks}
+    )
 
 @app.post("/api/analyze")
 async def analyze(date: str):
@@ -105,18 +254,27 @@ async def dashboard(username: str):
 # v1 Mobile-first API
 # --------------------
 
-@app.post("/v1/sessions")
+@app.post("/v1/sessions", tags=["Sessions"])
+@limiter.limit("10/minute")
 async def create_session(
+    request: Request,
     skill_level: str = "intermediate",
     game_mode: str = "play",
     authorization: Optional[str] = Header(None)
 ):
+    """Create a new chess coaching session."""
     require_auth(authorization)
     return session_manager.create(skill_level=skill_level, game_mode=game_mode)
 
 
-@app.get("/v1/sessions/{session_id}")
-async def get_session(session_id: str, authorization: Optional[str] = Header(None)):
+@app.get("/v1/sessions/{session_id}", tags=["Sessions"])
+@limiter.limit("30/minute")
+async def get_session(
+    request: Request,
+    session_id: str,
+    authorization: Optional[str] = Header(None)
+):
+    """Get the current state of a session."""
     require_auth(authorization)
     try:
         return session_manager.snapshot(session_id)
@@ -124,8 +282,15 @@ async def get_session(session_id: str, authorization: Optional[str] = Header(Non
         raise HTTPException(status_code=404, detail="Session not found")
 
 
-@app.post("/v1/sessions/{session_id}/move")
-async def play_move(session_id: str, move: str, authorization: Optional[str] = Header(None)):
+@app.post("/v1/sessions/{session_id}/move", tags=["Sessions"])
+@limiter.limit("60/minute")
+async def play_move(
+    request: Request,
+    session_id: str,
+    move: str,
+    authorization: Optional[str] = Header(None)
+):
+    """Submit a move and get coaching feedback."""
     require_auth(authorization)
     try:
         result = await session_manager.apply_move(session_id, move)
@@ -143,8 +308,14 @@ async def play_move(session_id: str, move: str, authorization: Optional[str] = H
         raise HTTPException(status_code=404, detail="Session not found")
 
 
-@app.get("/v1/sessions/{session_id}/stream")
-async def stream_move(session_id: str, move: str, authorization: Optional[str] = Header(None)):
+@app.get("/v1/sessions/{session_id}/stream", tags=["Sessions"])
+@limiter.limit("60/minute")
+async def stream_move(
+    request: Request,
+    session_id: str,
+    move: str,
+    authorization: Optional[str] = Header(None)
+):
     """SSE stream: emits a quick 'basic' event, then a full 'extended' event."""
     require_auth(authorization)
 
@@ -293,13 +464,21 @@ async def stream_move(session_id: str, move: str, authorization: Optional[str] =
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
-@app.post("/v1/runs")
+@app.post("/v1/runs", tags=["Analysis"])
+@limiter.limit("5/minute")
 async def run_batch_analysis(
+    request: Request,
     pgn: str = Form(...),
     level: str = Form("intermediate"),
     authorization: Optional[str] = Header(None),
 ):
+    """Run batch analysis on a complete PGN game."""
     require_auth(authorization)
+
+    # Validate PGN size
+    if len(pgn) > 100000:  # ~100KB limit
+        raise HTTPException(status_code=400, detail="PGN too large (max 100KB)")
+
     summary = await analyze_pgn_to_feedback(pgn, level=level)
     if not summary:
         raise HTTPException(status_code=400, detail="Invalid or empty PGN")

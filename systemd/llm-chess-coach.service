@@ -1,0 +1,47 @@
+[Unit]
+Description=LLM Chess Coach FastAPI Application
+After=network.target
+
+[Service]
+Type=notify
+User=chesscoach
+Group=chesscoach
+WorkingDirectory=/opt/llm-chess-coach
+Environment="PATH=/opt/llm-chess-coach/venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/opt/llm-chess-coach/.env
+ExecStart=/opt/llm-chess-coach/venv/bin/gunicorn api_server:app \
+    --config /opt/llm-chess-coach/gunicorn_config.py \
+    --bind unix:/opt/llm-chess-coach/llm-chess-coach.sock \
+    --worker-class uvicorn.workers.UvicornWorker
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/llm-chess-coach/logs /opt/llm-chess-coach/games /opt/llm-chess-coach/samples
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=512
+
+# Restart policy
+Restart=always
+RestartSec=10
+StartLimitInterval=5min
+StartLimitBurst=3
+
+# Logging
+StandardOutput=append:/opt/llm-chess-coach/logs/app.log
+StandardError=append:/opt/llm-chess-coach/logs/error.log
+
+[Install]
+WantedBy=multi-user.target

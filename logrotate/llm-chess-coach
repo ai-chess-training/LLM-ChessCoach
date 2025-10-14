@@ -1,0 +1,28 @@
+# Log rotation configuration for LLM Chess Coach
+# Copy to /etc/logrotate.d/llm-chess-coach
+
+/opt/llm-chess-coach/logs/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    notifempty
+    create 0640 chesscoach chesscoach
+    sharedscripts
+    postrotate
+        systemctl reload llm-chess-coach.service > /dev/null 2>&1 || true
+    endscript
+}
+
+/var/log/nginx/llm-chess-coach-*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    notifempty
+    create 0640 www-data adm
+    sharedscripts
+    postrotate
+        nginx -s reload > /dev/null 2>&1 || true
+    endscript
+}
