@@ -46,7 +46,7 @@ USER chesscoach
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    STOCKFISH_PATH=/usr/games/stockfish \
+    STOCKFISH_PATH=engines/stockfish \
     PORT=8000
 
 # Expose port (Heroku will override with $PORT)

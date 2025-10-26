@@ -5,6 +5,7 @@
 # - Binds to $PORT (Heroku's dynamic port)
 # - Uses configuration from gunicorn_config.py
 # - Worker count is configured via GUNICORN_WORKERS env var (default: 2x CPU + 1)
+worker: bash startbot.sh
 web: gunicorn api_server:app --bind 0.0.0.0:$PORT --config gunicorn_config.py
 
 # Release process: Run before new release is deployed

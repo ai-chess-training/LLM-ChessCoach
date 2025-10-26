@@ -105,7 +105,7 @@ Click the button above to deploy instantly with pre-configured settings.
    heroku config:set OPENAI_API_ENDPOINT=https://openrouter.ai/api/v1
 
    # Required: Stockfish path (installed via Aptfile)
-   heroku config:set STOCKFISH_PATH=/usr/games/stockfish
+   heroku config:set STOCKFISH_PATH=engines/stockfish
 
    # Production settings
    heroku config:set ENVIRONMENT=production

@@ -103,7 +103,7 @@ heroku config:set OPENAI_MODEL=google/gemini-2.5-flash-lite
 heroku config:set OPENAI_API_ENDPOINT=https://openrouter.ai/api/v1
 
 # Chess Engine
-heroku config:set STOCKFISH_PATH=/usr/games/stockfish
+heroku config:set STOCKFISH_PATH=engines/stockfish
 
 # Application Settings
 heroku config:set ENVIRONMENT=production

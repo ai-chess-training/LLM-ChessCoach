@@ -15,7 +15,7 @@ setup:
       as: REDIS
   config:
     ENVIRONMENT: production
-    STOCKFISH_PATH: /usr/games/stockfish
+    STOCKFISH_PATH: engines/stockfish
     LOG_LEVEL: INFO
     MULTIPV: 3
     NODES_PER_PV: 250000

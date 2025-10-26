@@ -123,7 +123,7 @@ OPENAI_API_KEY=sk-your-openai-key-here
 ALLOWED_ORIGINS=https://yourdomain.com,https://www.yourdomain.com
 
 # Stockfish path (Ubuntu default)
-STOCKFISH_PATH=/usr/games/stockfish
+STOCKFISH_PATH=engines/stockfish
 ```
 
 **Optional settings:**
@@ -345,7 +345,7 @@ sudo apt install stockfish
 Update STOCKFISH_PATH in `.env`:
 
 ```bash
-STOCKFISH_PATH=/usr/games/stockfish
+STOCKFISH_PATH=engines/stockfish
 ```
 
 ### Permission Errors
