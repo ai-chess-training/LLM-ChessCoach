@@ -1,0 +1,6 @@
+# System packages to install via heroku-buildpack-apt
+# Required for LLM-ChessCoach to function on Heroku
+
+# Stockfish chess engine - provides UCI-compatible chess analysis
+# Installed to /usr/games/stockfish
+stockfish

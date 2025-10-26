@@ -1,0 +1,66 @@
+# .slugignore - Files to exclude from Heroku deployment slug
+# Reduces slug size and speeds up deployment
+
+# Documentation
+*.md
+!README.md
+DEPLOYMENT.md
+AGENTS.md
+INTERACTIVE_PLAY.md
+CLAUDE.md
+docs/
+documents/
+
+# Tests
+tests/
+.pytest_cache/
+*.pyc
+__pycache__/
+
+# Sample data and analysis results
+samples/
+games/
+
+# Legacy/archived code
+legacy/
+
+# Development tools
+.vscode/
+.idea/
+*.sublime-*
+
+# VPS deployment scripts (not needed on Heroku)
+scripts/setup_ubuntu_vps.sh
+scripts/setup_ssl.sh
+scripts/harden_server.sh
+scripts/deploy.sh
+scripts/backup.sh
+
+# System configuration files (VPS-specific)
+systemd/
+nginx/
+logrotate/
+
+# Git files
+.git/
+.gitignore
+.gitattributes
+
+# Environment files (use Heroku config vars instead)
+.env
+.env.example
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# Postman collections
+docs/postman/
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store

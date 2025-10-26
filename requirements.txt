@@ -1,10 +1,21 @@
+# Core dependencies
 chess==1.10.0
 fastapi==0.109.2
 uvicorn[standard]==0.25.0
 requests==2.31.0
 python-multipart==0.0.9
-openai>=1.0.0
+openai==1.58.1
 python-dotenv==1.0.1
+
+# Production server
 gunicorn==21.2.0
+
+# Rate limiting and security
 slowapi==0.1.9
+
+# Logging
 python-json-logger==2.0.7
+
+# Optional: Redis for caching (uncomment if using Redis add-on)
+# redis==5.0.1
+# hiredis==2.3.2

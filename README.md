@@ -63,6 +63,153 @@ python3 scripts/run_luna_analysis.py --raw_dir samples/luna/raw --out_dir sample
 
 ## Deployment
 
+### Heroku Deployment (Cloud Platform)
+
+Deploy LLM-ChessCoach to Heroku with automated buildpacks, environment configuration, and scalable dynos.
+
+#### Prerequisites
+
+- [Heroku CLI](https://devcenter.heroku.com/articles/heroku-cli) installed
+- Heroku account
+- OpenAI API key or OpenRouter account
+
+#### One-Click Deploy
+
+[![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy)
+
+Click the button above to deploy instantly with pre-configured settings.
+
+#### Manual Deployment
+
+1. **Create Heroku App**:
+   ```bash
+   heroku create your-app-name
+   ```
+
+2. **Add Buildpacks** (for Stockfish installation):
+   ```bash
+   heroku buildpacks:add --index 1 https://github.com/heroku/heroku-buildpack-apt
+   heroku buildpacks:add --index 2 heroku/python
+   ```
+
+3. **Configure Environment Variables**:
+   ```bash
+   # Required: Generate secure API key
+   heroku config:set API_KEY=$(openssl rand -hex 32)
+
+   # Required: OpenAI or OpenRouter API key
+   heroku config:set OPENAI_API_KEY=your-api-key-here
+
+   # Recommended: Use cost-effective model via OpenRouter
+   heroku config:set OPENAI_MODEL=google/gemini-2.5-flash-lite
+   heroku config:set OPENAI_API_ENDPOINT=https://openrouter.ai/api/v1
+
+   # Required: Stockfish path (installed via Aptfile)
+   heroku config:set STOCKFISH_PATH=/usr/games/stockfish
+
+   # Production settings
+   heroku config:set ENVIRONMENT=production
+   heroku config:set LOG_LEVEL=INFO
+
+   # CORS (update with your frontend domain)
+   heroku config:set ALLOWED_ORIGINS=https://your-frontend-domain.com
+
+   # Performance tuning (adjust based on dyno tier)
+   heroku config:set MULTIPV=3
+   heroku config:set NODES_PER_PV=250000
+   heroku config:set GUNICORN_WORKERS=4
+   ```
+
+4. **Optional: Add Redis for Caching** (improves performance):
+   ```bash
+   heroku addons:create heroku-redis:mini
+   ```
+
+5. **Deploy to Heroku**:
+   ```bash
+   git push heroku master
+   ```
+
+6. **Verify Deployment**:
+   ```bash
+   # Check application logs
+   heroku logs --tail
+
+   # Test health endpoint
+   curl https://your-app-name.herokuapp.com/health
+
+   # Test readiness (validates Stockfish)
+   curl https://your-app-name.herokuapp.com/ready
+   ```
+
+#### Dyno Recommendations
+
+- **Basic ($7/month)**: Development/testing only
+  - 512MB RAM
+  - Sleeps after 30 min inactivity
+  - Set `MULTIPV=2`, `NODES_PER_PV=50000`, `GUNICORN_WORKERS=2`
+
+- **Standard-1x ($25/month)**: Production (recommended)
+  - 512MB RAM
+  - No sleeping
+  - Set `MULTIPV=3`, `NODES_PER_PV=250000`, `GUNICORN_WORKERS=4`
+
+- **Standard-2x ($50/month)**: High-traffic production
+  - 1GB RAM
+  - Better performance for concurrent requests
+  - Set `MULTIPV=5`, `NODES_PER_PV=500000`, `GUNICORN_WORKERS=8`
+
+- **Performance-M ($250/month)**: Heavy workloads
+  - 2.5GB RAM
+  - Maximum analysis quality
+  - Set `MULTIPV=5`, `NODES_PER_PV=1000000`, `GUNICORN_WORKERS=12`
+
+#### GitHub Integration (Auto-Deploy)
+
+1. Connect your Heroku app to GitHub repository
+2. Enable automatic deploys from master branch
+3. Optional: Enable "Wait for CI to pass" if you have tests configured
+
+#### Monitoring & Logs
+
+```bash
+# View real-time logs
+heroku logs --tail
+
+# View logs from specific dyno
+heroku logs --tail --dyno web.1
+
+# Add Papertrail for better log management
+heroku addons:create papertrail:choklad
+```
+
+#### Scaling
+
+```bash
+# Scale web dynos
+heroku ps:scale web=2
+
+# Change dyno type
+heroku ps:type web=standard-2x
+```
+
+#### Troubleshooting
+
+**Issue: "Stockfish not found"**
+- Solution: Verify buildpacks are in correct order (apt first, then python)
+- Check: `heroku buildpacks` should show apt at index 1
+
+**Issue: "Memory exceeded"**
+- Solution: Reduce `NODES_PER_PV` or `MULTIPV` settings
+- Or: Upgrade to larger dyno tier
+
+**Issue: "H12 Request timeout"**
+- Solution: Long analysis may timeout. Consider reducing analysis depth or upgrading dyno
+
+For more details, see [Heroku Documentation](https://devcenter.heroku.com/).
+
+---
+
 ### Ubuntu VPS Deployment (Production)
 
 For production deployment to an Ubuntu VPS (OVHCloud, DigitalOcean, Linode, etc.), see the comprehensive [DEPLOYMENT.md](DEPLOYMENT.md) guide.

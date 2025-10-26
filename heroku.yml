@@ -1,0 +1,35 @@
+# Heroku Container Deployment Configuration
+# Alternative to buildpack-based deployment
+# Use this for Docker-based deployments with more control over the environment
+#
+# To use this file:
+# 1. Set stack to container: heroku stack:set container
+# 2. Push to Heroku: git push heroku master
+#
+# Note: You'll also need to create a Dockerfile (not included by default)
+# This approach gives you full control but requires maintaining a Dockerfile
+
+setup:
+  addons:
+    - plan: heroku-redis:mini
+      as: REDIS
+  config:
+    ENVIRONMENT: production
+    STOCKFISH_PATH: /usr/games/stockfish
+    LOG_LEVEL: INFO
+    MULTIPV: 3
+    NODES_PER_PV: 250000
+
+build:
+  docker:
+    web: Dockerfile
+  config:
+    DOCKER_BUILDKIT: 1
+
+run:
+  web: gunicorn api_server:app --bind 0.0.0.0:$PORT --config gunicorn_config.py
+
+release:
+  image: web
+  command:
+    - python -c "from api_server import validate_environment; validate_environment()"

@@ -1,0 +1,140 @@
+{
+  "name": "LLM-ChessCoach",
+  "description": "AI-powered chess coaching API that combines Stockfish engine analysis with Large Language Models to provide personalized coaching feedback and game analysis.",
+  "repository": "https://github.com/yourusername/LLM-ChessCoach",
+  "logo": "https://raw.githubusercontent.com/yourusername/LLM-ChessCoach/master/docs/logo.png",
+  "keywords": [
+    "chess",
+    "ai",
+    "llm",
+    "stockfish",
+    "fastapi",
+    "coaching",
+    "game-analysis",
+    "openai"
+  ],
+  "success_url": "/docs",
+  "buildpacks": [
+    {
+      "url": "https://github.com/heroku/heroku-buildpack-apt"
+    },
+    {
+      "url": "heroku/python"
+    }
+  ],
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "standard-1x"
+    }
+  },
+  "stack": "heroku-22",
+  "env": {
+    "ENVIRONMENT": {
+      "description": "Application environment (development or production)",
+      "value": "production",
+      "required": true
+    },
+    "API_KEY": {
+      "description": "Secure API key for bearer token authentication. Generate with: openssl rand -hex 32",
+      "required": true,
+      "generator": "secret"
+    },
+    "OPENAI_API_KEY": {
+      "description": "OpenAI API key (or compatible API key from OpenRouter, etc.) for LLM coaching features",
+      "required": true
+    },
+    "OPENAI_MODEL": {
+      "description": "LLM model to use for coaching (default: google/gemini-2.5-flash-lite for cost efficiency)",
+      "value": "google/gemini-2.5-flash-lite",
+      "required": false
+    },
+    "OPENAI_API_ENDPOINT": {
+      "description": "Custom OpenAI-compatible API endpoint (e.g., https://openrouter.ai/api/v1)",
+      "value": "https://openrouter.ai/api/v1",
+      "required": false
+    },
+    "STOCKFISH_PATH": {
+      "description": "Path to Stockfish binary (installed via Aptfile)",
+      "value": "/usr/games/stockfish",
+      "required": true
+    },
+    "MULTIPV": {
+      "description": "Number of principal variations to analyze (1-5). Higher = more alternatives shown but slower. Recommended: 3 for Standard dynos, 5 for Performance dynos",
+      "value": "3",
+      "required": false
+    },
+    "NODES_PER_PV": {
+      "description": "Stockfish nodes per variation. Higher = more accurate but slower. Recommended: 100000-500000 for Standard dynos, 1000000 for Performance dynos",
+      "value": "250000",
+      "required": false
+    },
+    "LOG_LEVEL": {
+      "description": "Logging verbosity level",
+      "value": "INFO",
+      "required": false
+    },
+    "ALLOWED_ORIGINS": {
+      "description": "CORS allowed origins (comma-separated). Use * for all origins (not recommended in production) or specify your frontend domain(s)",
+      "value": "*",
+      "required": false
+    },
+    "GUNICORN_WORKERS": {
+      "description": "Number of Gunicorn worker processes. Default is (CPU count * 2 + 1). Standard-1x: 2-4, Standard-2x: 4-8",
+      "value": "4",
+      "required": false
+    },
+    "LICHESS_API_TOKEN": {
+      "description": "Optional: Lichess API token for fetching games from Lichess",
+      "required": false
+    }
+  },
+  "addons": [
+    {
+      "plan": "heroku-redis:mini",
+      "as": "REDIS",
+      "options": {
+        "wait": true
+      }
+    }
+  ],
+  "scripts": {
+    "postdeploy": "echo 'LLM-ChessCoach deployed successfully! Visit /docs for API documentation.'"
+  },
+  "environments": {
+    "review": {
+      "formation": {
+        "web": {
+          "quantity": 1,
+          "size": "basic"
+        }
+      },
+      "env": {
+        "MULTIPV": {
+          "value": "2"
+        },
+        "NODES_PER_PV": {
+          "value": "50000"
+        }
+      },
+      "addons": []
+    },
+    "test": {
+      "formation": {
+        "web": {
+          "quantity": 1,
+          "size": "basic"
+        }
+      },
+      "env": {
+        "MULTIPV": {
+          "value": "2"
+        },
+        "NODES_PER_PV": {
+          "value": "50000"
+        }
+      },
+      "addons": []
+    }
+  }
+}

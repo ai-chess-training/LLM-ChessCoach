@@ -1,0 +1,92 @@
+# .dockerignore - Exclude files from Docker build context
+# Reduces image size and speeds up builds
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+!README.md
+docs/
+documents/
+DEPLOYMENT.md
+AGENTS.md
+INTERACTIVE_PLAY.md
+CLAUDE.md
+
+# Tests and test data
+tests/
+.pytest_cache/
+samples/
+games/
+
+# Legacy code
+legacy/
+
+# Python cache and build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+chess-coach-venv/
+
+# Development files
+.vscode/
+.idea/
+*.sublime-*
+.DS_Store
+
+# Environment files (use Heroku config vars)
+.env
+.env.example
+.env.*
+
+# VPS deployment scripts (not needed in container)
+scripts/setup_ubuntu_vps.sh
+scripts/setup_ssl.sh
+scripts/harden_server.sh
+scripts/deploy.sh
+scripts/backup.sh
+systemd/
+nginx/
+logrotate/
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+*~
+
+# Heroku files (not needed inside container)
+Procfile
+runtime.txt
+Aptfile
+.slugignore
+heroku.yml
+
+# Docker files
+Dockerfile
+.dockerignore
+
+# Postman
+docs/postman/
+
+# Config files not needed in container
+config.json
+schedules.json
