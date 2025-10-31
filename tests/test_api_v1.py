@@ -53,7 +53,6 @@ def test_session_flow(client: TestClient):
     assert fb and fb.get("san") == "e4"
     assert "basic" in fb and isinstance(fb["basic"], str)
     assert "extended" in fb and isinstance(fb["extended"], str)
-    assert "drills" in fb and isinstance(fb["drills"], list)
 
 
 @pytest.mark.skipif(not stockfish_available(), reason="Stockfish binary not available")
@@ -100,12 +99,11 @@ def test_batch_run(client: TestClient):
     assert r.status_code == 200, r.text
     summary = r.json()
     assert "moves" in summary and len(summary["moves"]) >= 4
-    # Check first move has basic/extended/drills
+    # Check first move has basic/extended
     m0 = summary["moves"][0]
     assert m0.get("san") == "e4"
     assert isinstance(m0.get("basic"), str)
     assert isinstance(m0.get("extended"), str)
-    assert isinstance(m0.get("drills"), list)
 
 
 @pytest.mark.skipif(not stockfish_available(), reason="Stockfish binary not available")
@@ -189,7 +187,5 @@ def test_llm_coach_direct_uses_openai():
     # Validate structural constraints
     assert isinstance(out.get("basic"), str) and len(out["basic"].split()) <= 15
     assert isinstance(out.get("extended"), str) and len(out["extended"].split()) <= 100
-    assert isinstance(out.get("tags"), list)
-    assert isinstance(out.get("drills"), list)
     # Preferably used LLM; if not, at least return rules
     assert out.get("source") in ("llm", "rules")

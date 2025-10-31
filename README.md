@@ -12,7 +12,7 @@ LLM-ChessCoach is an innovative tool that leverages Large Language Models (LLM),
 2. `stockfish_engine.py`: Engine wrapper with MultiPV and mover-perspective loss.
 3. `live_sessions.py`: In-memory live sessions (play vs engine) with SSE streaming.
 4. `analysis_pipeline.py`: Batch PGN analysis to MoveFeedback + summary.
-5. `llm_coach.py`: LLM-backed coaching with rule-based fallback and drills.
+5. `llm_coach.py`: LLM-backed coaching with rule-based fallback.
 6. `schemas.py`: Pydantic models for API responses.
 7. `export_lichess_games.py`: Lichess fetcher (reads token from env var).
 8. `legacy/`: Previous Streamlit and React UI kept for reference.
@@ -31,7 +31,7 @@ Auth: set `API_KEY` in environment and include `Authorization: Bearer <API_KEY>`
 
 Key endpoints:
 - `POST /v1/sessions?skill_level=intermediate` → `{session_id, fen_start}`
-- `POST /v1/sessions/{id}/move?move=e4` → per-move feedback (basic+extended+drills)
+- `POST /v1/sessions/{id}/move?move=e4` → per-move feedback (basic+extended)
 - `GET /v1/sessions/{id}/stream?move=e4` (SSE) → `basic` then `extended` events
 - `POST /v1/runs` (body: `pgn`) → full game feedback and summary
 
@@ -39,7 +39,7 @@ Key endpoints:
 Streamlit and the previous React demo are available under `legacy/`.
 
 ### LLM Model
-- The backend uses OpenAI models for extended coaching and drills. By default it targets `gpt-5-nano`.
+- The backend uses OpenAI models for extended coaching. By default it targets `gpt-5-nano`.
 - You can override with `OPENAI_MODEL` (e.g., `gpt-5`, `gpt-5-pro`), but models older than GPT‑5 are ignored in favor of `gpt-5-nano` to preserve chess understanding quality.
 
 ### LunaNetEngine Sample Workflow
@@ -144,25 +144,11 @@ Click the button above to deploy instantly with pre-configured settings.
 
 #### Dyno Recommendations
 
-- **Basic ($7/month)**: Development/testing only
+- **Basic ($7/month)**:
   - 512MB RAM
   - Sleeps after 30 min inactivity
   - Set `MULTIPV=2`, `NODES_PER_PV=50000`, `GUNICORN_WORKERS=2`
 
-- **Standard-1x ($25/month)**: Production (recommended)
-  - 512MB RAM
-  - No sleeping
-  - Set `MULTIPV=3`, `NODES_PER_PV=250000`, `GUNICORN_WORKERS=4`
-
-- **Standard-2x ($50/month)**: High-traffic production
-  - 1GB RAM
-  - Better performance for concurrent requests
-  - Set `MULTIPV=5`, `NODES_PER_PV=500000`, `GUNICORN_WORKERS=8`
-
-- **Performance-M ($250/month)**: Heavy workloads
-  - 2.5GB RAM
-  - Maximum analysis quality
-  - Set `MULTIPV=5`, `NODES_PER_PV=1000000`, `GUNICORN_WORKERS=12`
 
 #### GitHub Integration (Auto-Deploy)
 

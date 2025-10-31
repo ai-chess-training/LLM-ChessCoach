@@ -163,8 +163,6 @@ class SessionManager:
             {
                 "basic": coach.get("basic"),
                 "extended": coach.get("extended"),
-                "tags": coach.get("tags", []),
-                "drills": coach.get("drills", []),
                 "source": coach.get("source", "rules"),
             }
         )

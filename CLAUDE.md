@@ -23,7 +23,7 @@ This document defines how we build, review, and operate this project.
 
 ## API Contracts
 - Canonical response shapes defined in `schemas.py`.
-- Per‑move includes: basic (≤15 words), extended (≤100 words), multipv, severity, drills.
+- Per‑move includes: basic (≤15 words), extended (≤100 words), multipv, severity.
 - SSE stream emits `basic` then `extended` for live moves.
 - Bearer auth required for all `/v1/*` endpoints; enforce quotas at the gateway (future).
 

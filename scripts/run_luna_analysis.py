@@ -62,9 +62,6 @@ def write_outputs(base_dir: str, stem: str, data: dict):
         for m in data.get("moves", [])[:40]:
             f.write(f"{m['move_no']}. {m['san']} ({m['side']})  |  {m.get('basic','')}\n")
             f.write(f"  Extended: {m.get('extended','')}\n")
-            drills = m.get("drills", [])
-            if drills:
-                f.write(f"  Drill: {drills[0].get('objective','')}\n")
         f.write("\n")
 
     print(f"Wrote {json_path} and {txt_path}")

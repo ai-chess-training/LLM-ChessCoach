@@ -172,8 +172,6 @@ Retrieves current session state and move history.
       "multipv": [...],
       "basic": "Good opening move",
       "extended": "The King's pawn opening...",
-      "tags": ["opening", "center_control"],
-      "drills": [...],
       "is_engine_move": false  // Indicates if this was an engine move
     }
   ]
@@ -232,16 +230,6 @@ Submits a move for analysis in a session. In "play" mode, also returns the engin
     ],
     "basic": "string",               // Brief feedback (≤15 words)
     "extended": "string",            // Detailed explanation (≤100 words)
-    "tags": ["string"],              // Move classification tags
-    "drills": [                      // Practice positions
-      {
-        "fen": "string",
-        "side_to_move": "white" | "black",
-        "objective": "string",
-        "best_line_san": ["string"],
-        "alt_traps_san": ["string"]
-      }
-    ],
     "source": "llm" | "rules"        // Coaching source
   },
   "engine_move": {              // Engine's response (only in "play" mode)
@@ -335,8 +323,6 @@ data: {
   "multipv": [...],
   "basic": "Good opening move",
   "extended": "The King's pawn opening controls the center...",
-  "tags": ["opening", "center_control"],
-  "drills": [...]
 }
 ```
 
@@ -392,8 +378,6 @@ Batch analysis of complete games via PGN.
       "multipv": [...],
       "basic": "string",
       "extended": "string",
-      "tags": ["string"],
-      "drills": [...],
       "source": "llm" | "rules"
     }
   ],
@@ -443,8 +427,6 @@ Complete feedback for a single move:
   // Coaching
   basic?: string;                    // Brief feedback (≤15 words)
   extended?: string;                 // Detailed explanation (≤100 words)
-  tags: string[];                    // Move classification tags
-  drills: Drill[];                   // Practice positions
 }
 ```
 

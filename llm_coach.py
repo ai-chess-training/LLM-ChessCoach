@@ -101,32 +101,9 @@ def rule_extended(move: Dict[str, Any]) -> str:
     return _truncate_words(text, 100)
 
 
-def make_drills(move: Dict[str, Any]) -> List[Dict[str, Any]]:
-    drills: List[Dict[str, Any]] = []
-    severity = severity_from_cp_loss(float(move.get("cp_loss") or 0.0))
-    if severity in ("mistake", "blunder", "inaccuracy"):
-        fen = move.get("fen_before")
-        side = move.get("side")
-        multipv: List[Dict[str, Any]] = move.get("multipv") or []
-        best_line = multipv[0]["line_san"] if multipv else []
-        alt = multipv[1]["line_san"] if len(multipv) > 1 else []
-        objective = "Find the best continuation"
-        if len(best_line) >= 1 and ("#" in " ".join(best_line) or "+" in " ".join(best_line)):
-            objective = "Convert advantage: find forcing line"
-        drills.append(
-            {
-                "fen": fen,
-                "side_to_move": side,
-                "objective": objective,
-                "best_line_san": best_line[:12],
-                "alt_traps_san": alt[:8],
-            }
-        )
-    return drills
-
 
 async def coach_move_with_llm(move: Dict[str, Any], level: str = "intermediate", use_llm: bool = True) -> Dict[str, Any]:
-    """Attempt to get LLM-generated basic/extended and drills. Fallback to rules on error.
+    """Attempt to get LLM-generated basic/extended. Fallback to rules on error.
 
     move: dict with fields (san, cp_loss, best_move_san, multipv[], fen_before, side, ...)
     """
@@ -139,8 +116,6 @@ async def coach_move_with_llm(move: Dict[str, Any], level: str = "intermediate",
     result = {
         "basic": rule_basic(move),
         "extended": rule_extended(move),
-        "drills": make_drills(move),
-        "tags": [],
         "source": "rules",
     }
 
@@ -169,10 +144,9 @@ async def coach_move_with_llm(move: Dict[str, Any], level: str = "intermediate",
     prompt = (
         "You are a concise chess coach. Given a move and engine data, "
         "return JSON with: basic (<=15 words), extended (<=100 words), "
-        "tags (array), and drills (array of {objective, best_line_san}). "
         f"Player level: {level}. Ground advice in PV; do not contradict engine.\n\n"
         f"Data:\n{json.dumps(structured)}\n\n"
-        "Return only a JSON object with keys: basic, extended, tags, drills."
+        "Return only a JSON object with keys: basic, extended."
     )
 
 
@@ -196,21 +170,6 @@ async def coach_move_with_llm(move: Dict[str, Any], level: str = "intermediate",
         # Enforce length limits
         obj["basic"] = _truncate_words(obj.get("basic", result["basic"]) or result["basic"], 15)
         obj["extended"] = _truncate_words(obj.get("extended", result["extended"]) or result["extended"], 100)
-        drills = obj.get("drills") or []
-        # Normalize drills structure
-        normalized_drills = []
-        for d in drills[:2]:
-            normalized_drills.append(
-                {
-                    "fen": move.get("fen_before"),
-                    "side_to_move": move.get("side"),
-                    "objective": d.get("objective") or "Find the best continuation",
-                    "best_line_san": d.get("best_line_san") or [],
-                    "alt_traps_san": d.get("alt_traps_san") or [],
-                }
-            )
-        obj["drills"] = normalized_drills or result["drills"]
-        obj["tags"] = obj.get("tags") or []
         obj["source"] = "llm"
         return obj
     except Exception as e:

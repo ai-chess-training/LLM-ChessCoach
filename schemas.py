@@ -42,8 +42,6 @@ class MoveFeedback(BaseModel):
     # Coaching
     basic: Optional[str] = None   # <=15 words
     extended: Optional[str] = None  # <=100 words
-    tags: List[str] = Field(default_factory=list)
-    drills: List[Drill] = Field(default_factory=list)
 
 
 class EngineMove(BaseModel):

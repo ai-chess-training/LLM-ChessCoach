@@ -372,8 +372,7 @@ async def stream_move(
         basic_text = rule_basic(basic_payload)
         yield f"event: basic\ndata: {json.dumps({'basic': basic_text, 'preview': basic_payload})}\n\n"
 
-        # Phase 2: full analysis for extended + drills
-        from llm_coach import make_drills, rule_extended
+        # Phase 2: full analysis for extended
         with StockfishAnalyzer(multipv=DEFAULT_MULTIPV) as analyzer:
             # recompute with full budget (~1M per PV configured in analyzer)
             eval_before_full = analyzer.analyze_position(board)
@@ -417,8 +416,6 @@ async def stream_move(
             {
                 "basic": coach.get("basic"),
                 "extended": coach.get("extended"),
-                "tags": coach.get("tags", []),
-                "drills": coach.get("drills", []),
             }
         )
 

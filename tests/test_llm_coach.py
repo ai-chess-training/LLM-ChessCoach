@@ -8,14 +8,6 @@ def test_coach_move_with_llm_returns_llm_source(monkeypatch):
     fake_response = {
         "basic": "Test basic guidance.",
         "extended": "Detailed extended coaching text for the player.",
-        "tags": ["test", "llm"],
-        "drills": [
-            {
-                "objective": "Find the best continuation",
-                "best_line_san": ["e4", "e5", "Nf3"],
-                "alt_traps_san": ["d4"],
-            }
-        ],
     }
 
     class FakeCompletions:
@@ -60,7 +52,3 @@ def test_coach_move_with_llm_returns_llm_source(monkeypatch):
     assert result["source"] == "llm"
     assert result["basic"] == fake_response["basic"]
     assert result["extended"].startswith("Detailed extended coaching")
-    assert result["tags"] == fake_response["tags"]
-    assert result["drills"], "Expected normalized drills from LLM response"
-    assert result["drills"][0]["fen"] == move_payload["fen_before"]
-    assert result["drills"][0]["objective"] == fake_response["drills"][0]["objective"]
