@@ -23,6 +23,14 @@ load_env()
 
 from live_sessions import session_manager
 from analysis_pipeline import analyze_pgn_to_feedback
+
+# Import redis for exception handling
+try:
+    import redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
+    redis = None
 from fastapi import Form
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -171,8 +179,32 @@ def require_auth(authorization: Optional[str] = None):
 # Health check endpoints
 @app.get("/health", tags=["Health"])
 async def health_check():
-    """Basic health check endpoint."""
-    return {"status": "healthy", "timestamp": time.time()}
+    """Health check endpoint with Redis connectivity check."""
+    checks = {
+        "api": "healthy",
+        "session_storage": "unknown",
+        "timestamp": time.time()
+    }
+
+    # Check Redis connectivity if using Redis session manager
+    from live_sessions import RedisSessionManager
+    if isinstance(session_manager, RedisSessionManager):
+        try:
+            session_manager.redis_client.ping()
+            checks["session_storage"] = "redis_ok"
+        except Exception as e:
+            logger.error(f"Redis health check failed: {e}")
+            checks["session_storage"] = "redis_unavailable"
+            checks["status"] = "degraded"
+            return JSONResponse(
+                status_code=503,
+                content=checks
+            )
+    else:
+        checks["session_storage"] = "in_memory"
+
+    checks["status"] = "healthy"
+    return checks
 
 @app.get("/ready", tags=["Health"])
 async def readiness_check():
@@ -180,6 +212,7 @@ async def readiness_check():
     checks = {
         "api": "ok",
         "stockfish": "ok",
+        "session_storage": "ok"
     }
 
     # Check if stockfish is available
@@ -188,7 +221,17 @@ async def readiness_check():
     if not shutil.which(stockfish_path):
         checks["stockfish"] = "unavailable"
 
-    all_ok = all(v == "ok" for v in checks.values())
+    # Check Redis connectivity if using Redis session manager
+    from live_sessions import RedisSessionManager
+    if isinstance(session_manager, RedisSessionManager):
+        try:
+            session_manager.redis_client.ping()
+            checks["session_storage"] = "redis_ok"
+        except Exception as e:
+            logger.error(f"Redis readiness check failed: {e}")
+            checks["session_storage"] = "redis_unavailable"
+
+    all_ok = all(v in ("ok", "redis_ok") for v in checks.values())
     status_code = 200 if all_ok else 503
 
     return JSONResponse(
@@ -280,6 +323,14 @@ async def get_session(
         return session_manager.snapshot(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Session not found")
+    except Exception as e:
+        # Handle Redis connection errors
+        if REDIS_AVAILABLE and redis and isinstance(e, (redis.RedisError, redis.ConnectionError)):
+            logger.error(f"Redis error in get_session: {e}", extra={"request_id": getattr(request.state, "request_id", None)})
+            raise HTTPException(status_code=503, detail="Session storage temporarily unavailable")
+        # Re-raise other exceptions
+        logger.error(f"Unexpected error in get_session: {e}", extra={"request_id": getattr(request.state, "request_id", None)})
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/v1/sessions/{session_id}/move", tags=["Sessions"])
@@ -306,6 +357,17 @@ async def play_move(
         return response
     except KeyError:
         raise HTTPException(status_code=404, detail="Session not found")
+    except HTTPException:
+        # Re-raise HTTP exceptions (like 400 for illegal moves)
+        raise
+    except Exception as e:
+        # Handle Redis connection errors
+        if REDIS_AVAILABLE and redis and isinstance(e, (redis.RedisError, redis.ConnectionError)):
+            logger.error(f"Redis error in play_move: {e}", extra={"request_id": getattr(request.state, "request_id", None)})
+            raise HTTPException(status_code=503, detail="Session storage temporarily unavailable")
+        # Re-raise other exceptions
+        logger.error(f"Unexpected error in play_move: {e}", extra={"request_id": getattr(request.state, "request_id", None)})
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/v1/sessions/{session_id}/stream", tags=["Sessions"])
@@ -329,6 +391,16 @@ async def stream_move(
             sess = session_manager.get(session_id)
         except KeyError:
             yield f"event: error\ndata: {json.dumps({'error':'Session not found'})}\n\n"
+            return
+        except Exception as e:
+            # Handle Redis connection errors
+            if REDIS_AVAILABLE and redis and isinstance(e, (redis.RedisError, redis.ConnectionError)):
+                logger.error(f"Redis error in stream_move: {e}")
+                yield f"event: error\ndata: {json.dumps({'error':'Session storage temporarily unavailable'})}\n\n"
+                return
+            # Handle other errors
+            logger.error(f"Unexpected error in stream_move: {e}")
+            yield f"event: error\ndata: {json.dumps({'error':'Internal server error'})}\n\n"
             return
 
         board: chess.Board = sess["board"]

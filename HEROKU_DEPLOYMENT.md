@@ -211,9 +211,9 @@ If you see memory errors (R14, R15):
 
 ## Add-ons
 
-### Redis (Caching) - Highly Recommended
+### Redis (Session Storage) - Required for Multi-Worker Deployments
 
-Improves performance by caching engine analysis and LLM responses.
+**IMPORTANT**: Redis is now **required** if you're using multiple workers (which is the default with gunicorn). Without Redis, sessions will randomly fail as requests hit different workers.
 
 ```bash
 # Add Redis
@@ -225,11 +225,16 @@ heroku config | grep REDIS_URL
 ```
 
 **Benefits**:
-- 60-80% faster repeated position analysis
-- Reduces OpenAI API costs
-- Handles session state across dyno restarts
+- **Session persistence across all workers** - sessions work correctly in multi-worker deployments
+- **Automatic session expiry** - sessions expire 24 hours after last use (sliding window)
+- **Dyno restart resilience** - sessions survive dyno restarts and scaling operations
+- **Future caching support** - infrastructure ready for engine analysis and LLM response caching
 
-**Note**: Requires code changes to implement caching (not yet implemented by default)
+**How it works**:
+- The application automatically detects `REDIS_URL` and uses Redis for session storage
+- Without `REDIS_URL`, falls back to in-memory storage (single worker only)
+- Sessions refresh their TTL on every access (get or apply_move), implementing a sliding 24-hour window
+- Health check endpoints (`/health`, `/ready`) monitor Redis connectivity
 
 ### Papertrail (Logging) - Recommended
 
@@ -297,15 +302,32 @@ heroku ps
 ### Health Checks
 
 ```bash
-# Basic health check
+# Health check (includes Redis connectivity check)
 curl https://your-app-name.herokuapp.com/health
 
-# Readiness check (validates Stockfish availability)
+# Expected response with Redis:
+# {
+#   "status": "healthy",
+#   "api": "healthy",
+#   "session_storage": "redis_ok",
+#   "timestamp": 1234567890.123
+# }
+
+# Readiness check (validates all critical dependencies)
 curl https://your-app-name.herokuapp.com/ready
 
 # Expected response:
-# {"status": "ready", "checks": {"api": "ok", "stockfish": "ok"}}
+# {
+#   "status": "ready",
+#   "checks": {
+#     "api": "ok",
+#     "stockfish": "ok",
+#     "session_storage": "redis_ok"
+#   }
+# }
 ```
+
+**Note**: If Redis is unavailable, `/health` returns 503 and session_storage shows "redis_unavailable".
 
 ## Cost Optimization
 

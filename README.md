@@ -10,7 +10,7 @@ LLM-ChessCoach is an innovative tool that leverages Large Language Models (LLM),
 ## Components
 1. `api_server.py`: FastAPI server providing REST endpoints (mobile-first MVP).
 2. `stockfish_engine.py`: Engine wrapper with MultiPV and mover-perspective loss.
-3. `live_sessions.py`: In-memory live sessions (play vs engine) with SSE streaming.
+3. `live_sessions.py`: Redis-backed session storage (play vs engine) with SSE streaming.
 4. `analysis_pipeline.py`: Batch PGN analysis to MoveFeedback + summary.
 5. `llm_coach.py`: LLM-backed coaching with rule-based fallback.
 6. `schemas.py`: Pydantic models for API responses.
@@ -120,10 +120,16 @@ Click the button above to deploy instantly with pre-configured settings.
    heroku config:set GUNICORN_WORKERS=4
    ```
 
-4. **Optional: Add Redis for Caching** (improves performance):
+4. **Add Redis for Session Storage** (required for multi-worker deployments):
    ```bash
    heroku addons:create heroku-redis:mini
+   # REDIS_URL is automatically set by Heroku
    ```
+
+   **Note**: Without Redis, sessions will fail in multi-worker environments. Redis is auto-detected and enables:
+   - Session persistence across all workers
+   - Automatic 24-hour session expiry (sliding window)
+   - Dyno restart resilience
 
 5. **Deploy to Heroku**:
    ```bash
