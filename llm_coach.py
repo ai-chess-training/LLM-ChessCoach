@@ -168,8 +168,8 @@ async def coach_move_with_llm(move: Dict[str, Any], level: str = "intermediate",
             content = content[:-3]
         obj = json.loads(content)
         # Enforce length limits
-        obj["basic"] = _truncate_words(obj.get("basic", result["basic"]) or result["basic"], 15)
-        obj["extended"] = _truncate_words(obj.get("extended", result["extended"]) or result["extended"], 100)
+        obj["basic"] = _truncate_words(obj.get("basic", result["basic"]) or result["basic"], 50)
+        obj["extended"] = _truncate_words(obj.get("extended", result["extended"]) or result["extended"], 200)
         obj["source"] = "llm"
         return obj
     except Exception as e:
