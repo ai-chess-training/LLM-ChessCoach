@@ -23,8 +23,8 @@ This document defines how we build, review, and operate this project.
 
 ## API Contracts
 - Canonical response shapes defined in `schemas.py`.
-- Per‑move includes: basic (≤15 words), extended (≤100 words), multipv, severity.
-- SSE stream emits `basic` then `extended` for live moves.
+- Per‑move includes: basic (≤40 words), multipv, severity.
+- SSE stream emits `basic` for live moves.
 - Bearer auth required for all `/v1/*` endpoints; enforce quotas at the gateway (future).
 
 ## Testing
@@ -46,5 +46,5 @@ This document defines how we build, review, and operate this project.
 ## Performance & Reliability
 - Use shared engine processes with bounded queues; pool where appropriate.
 - Cache engine/LLM results; add simple store (SQLite/LMDB) when stable.
-- Log timings and cache hit rates; watch latency budgets (basic ≤ 300ms, extended ≤ 2s).
+- Log timings and cache hit rates; watch latency budgets (basic ≤ 300ms).
 

@@ -40,8 +40,7 @@ class MoveFeedback(BaseModel):
     multipv: List[MultiPVEntry] = Field(default_factory=list)
 
     # Coaching
-    basic: Optional[str] = None   # <=15 words
-    extended: Optional[str] = None  # <=100 words
+    basic: Optional[str] = None   # <=40 words
 
 
 class EngineMove(BaseModel):

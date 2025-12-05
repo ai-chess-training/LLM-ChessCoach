@@ -378,7 +378,7 @@ async def stream_move(
     move: str,
     authorization: Optional[str] = Header(None)
 ):
-    """SSE stream: emits a quick 'basic' event, then a full 'extended' event."""
+    """SSE stream: emits a quick 'basic' event."""
     require_auth(authorization)
 
     async def event_gen():

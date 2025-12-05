@@ -171,7 +171,6 @@ Retrieves current session state and move history.
       "best_move_san": "e4",
       "multipv": [...],
       "basic": "Good opening move",
-      "extended": "The King's pawn opening...",
       "is_engine_move": false  // Indicates if this was an engine move
     }
   ]
@@ -228,8 +227,7 @@ Submits a move for analysis in a session. In "play" mode, also returns the engin
         "line_san": ["string"]       // Continuation moves (up to 10)
       }
     ],
-    "basic": "string",               // Brief feedback (≤15 words)
-    "extended": "string",            // Detailed explanation (≤100 words)
+    "basic": "string",               // Brief feedback (≤40 words)
     "source": "llm" | "rules"        // Coaching source
   },
   "engine_move": {              // Engine's response (only in "play" mode)
@@ -322,7 +320,6 @@ data: {
   "best_move_san": "e4",
   "multipv": [...],
   "basic": "Good opening move",
-  "extended": "The King's pawn opening controls the center...",
 }
 ```
 

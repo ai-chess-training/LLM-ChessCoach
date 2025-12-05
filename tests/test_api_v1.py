@@ -52,7 +52,6 @@ def test_session_flow(client: TestClient):
     fb = data2.get("feedback")
     assert fb and fb.get("san") == "e4"
     assert "basic" in fb and isinstance(fb["basic"], str)
-    assert "extended" in fb and isinstance(fb["extended"], str)
 
 
 @pytest.mark.skipif(not stockfish_available(), reason="Stockfish binary not available")

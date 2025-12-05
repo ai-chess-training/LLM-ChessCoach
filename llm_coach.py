@@ -60,11 +60,11 @@ def _truncate_words(text: str, max_words: int) -> str:
 def severity_from_cp_loss(cp_loss_pawns: float) -> str:
     # Tunable thresholds (in pawns)
     cp = abs(cp_loss_pawns)
-    if cp <= 0.05:
+    if cp <= 0.15:
         return "best"
-    if cp <= 0.20:
+    if cp <= 0.3:
         return "good"
-    if cp <= 0.50:
+    if cp <= 0.60:
         return "inaccuracy"
     if cp <= 1.50:
         return "mistake"
@@ -83,27 +83,11 @@ def rule_basic(move: Dict[str, Any]) -> str:
     return _truncate_words("Missed stronger option. Improve piece activity.", 15)
 
 
-def rule_extended(move: Dict[str, Any]) -> str:
-    # Concise extended feedback under 100 words
-    san = move.get("san")
-    best = move.get("best_move_san")
-    cp_loss = float(move.get("cp_loss") or 0.0)
-    multipv: List[Dict[str, Any]] = move.get("multipv") or []
-    best_line = (multipv[0]["line_san"] if multipv else [])
-    why = "This improves piece activity and reduces tactical weaknesses."
-    if cp_loss >= 0.5:
-        why = "This line protects against threats and gains a positional edge."
-    text = (
-        f"You played {san}. Engine prefers {best}. "
-        f"Evaluation worsened by {cp_loss:.2f} pawns. "
-        f"Main line: {' '.join(best_line[:8])}. {why}"
-    )
-    return _truncate_words(text, 100)
 
 
 
 async def coach_move_with_llm(move: Dict[str, Any], level: str = "intermediate", use_llm: bool = True) -> Dict[str, Any]:
-    """Attempt to get LLM-generated basic/extended. Fallback to rules on error.
+    """Attempt to get LLM-generated basic feedback. Fallback to rules on error.
 
     move: dict with fields (san, cp_loss, best_move_san, multipv[], fen_before, side, ...)
     """
@@ -115,7 +99,6 @@ async def coach_move_with_llm(move: Dict[str, Any], level: str = "intermediate",
     # Always build safe defaults
     result = {
         "basic": rule_basic(move),
-        "extended": rule_extended(move),
         "source": "rules",
     }
 
@@ -143,10 +126,10 @@ async def coach_move_with_llm(move: Dict[str, Any], level: str = "intermediate",
 
     prompt = (
         "You are a concise chess coach. Given a move and engine data, "
-        "return JSON with: basic (<=15 words), extended (<=100 words), "
+        "return JSON with: basic (<=40 words) "
         f"Player level: {level}. Ground advice in PV; do not contradict engine.\n\n"
         f"Data:\n{json.dumps(structured)}\n\n"
-        "Return only a JSON object with keys: basic, extended."
+        "Return only a JSON object with keys: basic."
     )
 
 
@@ -169,7 +152,6 @@ async def coach_move_with_llm(move: Dict[str, Any], level: str = "intermediate",
         obj = json.loads(content)
         # Enforce length limits
         obj["basic"] = _truncate_words(obj.get("basic", result["basic"]) or result["basic"], 50)
-        obj["extended"] = _truncate_words(obj.get("extended", result["extended"]) or result["extended"], 200)
         obj["source"] = "llm"
         return obj
     except Exception as e:

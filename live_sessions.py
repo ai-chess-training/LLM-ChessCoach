@@ -176,7 +176,6 @@ class SessionManager:
         feedback.update(
             {
                 "basic": coach.get("basic"),
-                "extended": coach.get("extended"),
                 "source": coach.get("source", "rules"),
             }
         )
@@ -399,7 +398,6 @@ class RedisSessionManager(SessionManager):
         feedback.update(
             {
                 "basic": coach.get("basic"),
-                "extended": coach.get("extended"),
                 "source": coach.get("source", "rules"),
             }
         )

@@ -71,7 +71,6 @@ async def analyze_pgn_to_feedback(
             payload.update(
                 {
                     "basic": coach.get("basic"),
-                    "extended": coach.get("extended"),
                     "source": coach.get("source", "rules"),
                 }
             )

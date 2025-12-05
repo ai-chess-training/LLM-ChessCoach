@@ -31,7 +31,7 @@ Auth: set `API_KEY` in environment and include `Authorization: Bearer <API_KEY>`
 
 Key endpoints:
 - `POST /v1/sessions?skill_level=intermediate` → `{session_id, fen_start}`
-- `POST /v1/sessions/{id}/move?move=e4` → per-move feedback (basic+extended)
+- `POST /v1/sessions/{id}/move?move=e4` → per-move feedback (basic)
 - `GET /v1/sessions/{id}/stream?move=e4` (SSE) → `basic` then `extended` events
 - `POST /v1/runs` (body: `pgn`) → full game feedback and summary
 
@@ -39,7 +39,7 @@ Key endpoints:
 Streamlit and the previous React demo are available under `legacy/`.
 
 ### LLM Model
-- The backend uses OpenAI models for extended coaching. By default it targets `gpt-5-nano`.
+- The backend uses OpenAI models for extended coaching. By default it targets `gemini 2.5 flash lite`.
 - You can override with `OPENAI_MODEL` (e.g., `gpt-5`, `gpt-5-pro`), but models older than GPT‑5 are ignored in favor of `gpt-5-nano` to preserve chess understanding quality.
 
 ### LunaNetEngine Sample Workflow
@@ -254,6 +254,6 @@ This project is licensed under the MIT License - see [LICENSE](LICENSE) for deta
 
 ## Acknowledgements
 - Chess websites for game data.
-- OpenAI's GPT-5-Nano for game analysis.
+- Google Gemini Flash Lite 2.5 for game analysis.
 
 

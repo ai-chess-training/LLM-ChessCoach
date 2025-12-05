@@ -60,7 +60,6 @@ Response (Play Mode):
     "severity": "best",
     "cp_loss": 0.05,
     "basic": "Solid move. Keep building your plan.",
-    "extended": "Detailed coaching feedback...",
     "multipv": [...]
   },
   "engine_move": {
@@ -80,7 +79,6 @@ GET /v1/sessions/{session_id}/stream?move={move}
 
 This endpoint streams the analysis in real-time:
 1. `basic` event: Quick feedback on the human move
-2. `extended` event: Detailed analysis
 3. `engine_move` event: Stockfish's response (if in play mode)
 
 ## Implementation Details
