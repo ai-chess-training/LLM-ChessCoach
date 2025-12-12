@@ -16,10 +16,11 @@ DEFAULT_NODES_PER_PV = int(os.getenv('NODES_PER_PV', '1000000'))
 
 # Skill level mappings for different player levels
 SKILL_LEVEL_MAPPINGS = {
-    "beginner": {"skill_level": 3, "move_time_ms": 150},
-    "intermediate": {"skill_level": 8, "move_time_ms": 250},
-    "advanced": {"skill_level": 13, "move_time_ms": 400},
-    "expert": {"skill_level": 18, "move_time_ms": 800}
+    "beginner": {"skill_level": 1, "move_time_ms": 100},
+    "adv_beginner" : {"skill_level": 2, "move_time_ms": 100},
+    "intermediate": {"skill_level": 3, "move_time_ms": 100},
+    "advanced": {"skill_level": 4, "move_time_ms": 100},
+    "expert": {"skill_level": 6, "move_time_ms": 100}
 }
 
 class StockfishAnalyzer:
