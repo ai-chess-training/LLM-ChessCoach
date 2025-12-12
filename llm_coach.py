@@ -141,13 +141,6 @@ async def coach_move_with_llm(move: Dict[str, Any], level: str = "intermediate",
                 {"role": "system", "content": "You are a concise chess coach that outputs strict JSON."},
                 {"role": "user", "content": prompt},
             ],
-            extra_body={
-                "reasoning": {
-                    "effort": "low", 
-                    "exclude": True,
-                    "enabled": True,
-                    }
-            },
         )
         content = completion.choices[0].message.content.strip()
         if content.startswith("```json"):
