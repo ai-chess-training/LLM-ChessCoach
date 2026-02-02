@@ -9,6 +9,8 @@
 # Data directories
 games/
 samples/
+data/training.db
+data/exports/
 
 # Configuration files (with sensitive data)
 config.json

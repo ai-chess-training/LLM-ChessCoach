@@ -2,11 +2,15 @@ import os
 import json
 import logging
 import time
+import asyncio
 from typing import Dict, Any, List, Optional
 
 from env_loader import load_env
 
 load_env()
+
+# Training data collection (lazy import to avoid circular deps)
+TRAINING_COLLECTION_ENABLED = os.getenv("ENABLE_TRAINING_COLLECTION", "0") == "1"
 
 
 logger = logging.getLogger(__name__)
@@ -91,6 +95,8 @@ async def coach_move_with_llm(move: Dict[str, Any], level: str = "intermediate",
 
     move: dict with fields (san, cp_loss, best_move_san, multipv[], fen_before, side, ...)
     """
+    start_time = time.time()
+
     # Use OPENAI_API_KEY consistently
     API_KEY = os.getenv("OPENAI_API_KEY")
     API_ENDPOINT = os.getenv("OPENAI_API_ENDPOINT", "https://api.openai.com/v1")
@@ -153,9 +159,24 @@ async def coach_move_with_llm(move: Dict[str, Any], level: str = "intermediate",
         # Enforce length limits
         obj["basic"] = _truncate_words(obj.get("basic", result["basic"]) or result["basic"], 50)
         obj["source"] = "llm"
-        return obj
+        result = obj
     except Exception as e:
         last_err = e
-    if last_err:
         _log_llm_event("LLM fallback to rules after attempting LLM model", last_err)
+
+    # Log to training database (non-blocking)
+    if TRAINING_COLLECTION_ENABLED:
+        latency_ms = int((time.time() - start_time) * 1000)
+        try:
+            from training.collector import log_coaching_sample
+            asyncio.create_task(log_coaching_sample(
+                move=move,
+                level=level,
+                response=result,
+                model=MODEL_NAME,
+                latency_ms=latency_ms,
+            ))
+        except Exception as collect_err:
+            logger.debug(f"Training collection failed: {collect_err}")
+
     return result
