@@ -391,7 +391,7 @@ async def dashboard(username: str):
 
 @app.post("/v1/auth/apple", tags=["Auth"])
 @limiter.limit("30/minute")
-async def auth_with_apple(payload: AppleAuthRequest):
+async def auth_with_apple(request: Request, payload: AppleAuthRequest):
     try:
         claims = verify_apple_identity_token(payload.identity_token, payload.nonce)
         user = entitlement_store.upsert_user(
@@ -412,13 +412,14 @@ async def auth_with_apple(payload: AppleAuthRequest):
 
 @app.get("/v1/entitlements", tags=["Auth"])
 @limiter.limit("60/minute")
-async def get_entitlements(current_user: AuthContext = Depends(get_auth_context)):
+async def get_entitlements(request: Request, current_user: AuthContext = Depends(get_auth_context)):
     return entitlement_store.get_entitlement_snapshot(current_user.user_id).to_dict()
 
 
 @app.post("/v1/purchases/app-store", tags=["Billing"])
 @limiter.limit("20/minute")
 async def process_app_store_purchase(
+    request: Request,
     payload: AppStorePurchaseRequest,
     current_user: AuthContext = Depends(get_auth_context),
 ):
@@ -448,7 +449,7 @@ async def process_app_store_purchase(
 
 @app.post("/v1/webhooks/app-store", tags=["Billing"])
 @limiter.limit("60/minute")
-async def handle_app_store_webhook(payload: AppStoreWebhookRequest):
+async def handle_app_store_webhook(request: Request, payload: AppStoreWebhookRequest):
     try:
         notification = verify_notification(payload.signedPayload)
     except AppStoreVerificationError as exc:

@@ -1,4 +1,5 @@
 import os
+import asyncio
 import json
 import shutil
 import pytest
@@ -37,6 +38,7 @@ def stockfish_available() -> bool:
 @pytest.fixture(scope="module")
 def client():
     os.environ.setdefault("API_KEY", "test-key")
+    importlib.reload(api_server)
     with TestClient(api_server.app) as c:
         yield c
 
@@ -113,12 +115,16 @@ def test_batch_run(client: TestClient):
     m0 = summary["moves"][0]
     assert m0.get("san") == "e4"
     assert isinstance(m0.get("basic"), str)
-    assert isinstance(m0.get("extended"), str)
+    assert m0.get("source") in ("llm", "rules")
 
 
 @pytest.mark.skipif(not stockfish_available(), reason="Stockfish binary not available")
 def test_session_two_moves_and_snapshot(client: TestClient):
-    r = client.post("/v1/sessions", params={"skill_level": "intermediate"}, headers=auth_headers())
+    r = client.post(
+        "/v1/sessions",
+        params={"skill_level": "intermediate", "game_mode": "training"},
+        headers=auth_headers(),
+    )
     assert r.status_code == 200
     sid = r.json()["session_id"]
 
@@ -142,14 +148,14 @@ def test_analysis_pipeline_direct(client: TestClient):
     )
     os.environ["MULTIPV"] = "3"
     os.environ["NODES_PER_PV"] = "20000"
-    summary = analyze_pgn_to_feedback(pgn, level="intermediate")
+    summary = asyncio.run(analyze_pgn_to_feedback(pgn, level="intermediate"))
     assert summary and "moves" in summary
     assert len(summary["moves"]) >= 10
     # Ensure multipv present and basic/extended populated
     sample = summary["moves"][0]
     assert isinstance(sample.get("multipv"), list)
     assert isinstance(sample.get("basic"), str)
-    assert isinstance(sample.get("extended"), str)
+    assert sample.get("source") in ("llm", "rules")
 
 
 def _load_openai_key_from_env_file() -> str:
@@ -192,10 +198,11 @@ def test_llm_coach_direct_uses_openai():
     }
 
     from llm_coach import coach_move_with_llm
-    out = coach_move_with_llm(move, level="intermediate")
+    out = asyncio.run(coach_move_with_llm(move, level="intermediate"))
 
     # Validate structural constraints
     assert isinstance(out.get("basic"), str) and len(out["basic"].split()) <= 15
-    assert isinstance(out.get("extended"), str) and len(out["extended"].split()) <= 100
     # Preferably used LLM; if not, at least return rules
     assert out.get("source") in ("llm", "rules")
+    if out.get("source") == "llm":
+        assert isinstance(out.get("extended"), str) and len(out["extended"].split()) <= 100

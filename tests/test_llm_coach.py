@@ -1,3 +1,4 @@
+import asyncio
 import json
 import types
 
@@ -11,7 +12,7 @@ def test_coach_move_with_llm_returns_llm_source(monkeypatch):
     }
 
     class FakeCompletions:
-        def create(self, **kwargs):
+        async def create(self, **kwargs):
             return types.SimpleNamespace(
                 choices=[
                     types.SimpleNamespace(
@@ -28,7 +29,7 @@ def test_coach_move_with_llm_returns_llm_source(monkeypatch):
 
     import openai
 
-    monkeypatch.setattr(openai, "OpenAI", lambda *args, **kwargs: FakeClient())
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda *args, **kwargs: FakeClient())
 
     move_payload = {
         "san": "e4",
@@ -47,7 +48,8 @@ def test_coach_move_with_llm_returns_llm_source(monkeypatch):
         ],
     }
 
-    result = llm_coach.coach_move_with_llm(move_payload, level="intermediate")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    result = asyncio.run(llm_coach.coach_move_with_llm(move_payload, level="intermediate"))
 
     assert result["source"] == "llm"
     assert result["basic"] == fake_response["basic"]
