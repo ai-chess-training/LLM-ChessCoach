@@ -5,6 +5,27 @@ info:
 servers:
   - url: http://localhost:8000
 paths:
+  /v1/auth/apple:
+    post:
+      summary: Exchange a Sign in with Apple identity token for a backend bearer token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                identity_token: { type: string }
+                nonce: { type: string }
+      responses:
+        '200':
+          description: Backend token and entitlement snapshot
+  /v1/entitlements:
+    get:
+      summary: Get the current trial and paid-game balance
+      responses:
+        '200':
+          description: Entitlement snapshot
   /v1/sessions:
     post:
       summary: Create a live session vs engine
@@ -86,4 +107,31 @@ paths:
       responses:
         '200':
           description: Analysis summary and moves
-
+  /v1/purchases/app-store:
+    post:
+      summary: Verify a StoreKit 2 signed transaction and credit purchased games
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                signed_transaction_info: { type: string }
+      responses:
+        '200':
+          description: Purchase credit result
+  /v1/webhooks/app-store:
+    post:
+      summary: Receive App Store Server Notifications V2 events
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                signedPayload: { type: string }
+      responses:
+        '200':
+          description: Notification processed

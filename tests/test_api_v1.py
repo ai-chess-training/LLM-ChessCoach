@@ -4,15 +4,26 @@ import shutil
 import pytest
 from fastapi.testclient import TestClient
 
+TEST_DB_PATH = "/tmp/llm_chesscoach_test_api_v1.db"
+if os.path.exists(TEST_DB_PATH):
+    os.remove(TEST_DB_PATH)
+
 os.environ.setdefault("API_KEY", "test-key")
+os.environ.setdefault("BACKEND_AUTH_SECRET", "test-backend-secret")
+os.environ.setdefault("DATABASE_URL", f"sqlite:///{TEST_DB_PATH}")
+os.environ.setdefault("APPLE_BUNDLE_ID", "com.llmchesscoach.test")
+os.environ.setdefault("APPSTORE_PRODUCT_ID_30_GAMES", "com.llmchesscoach.games30")
 # Speed up engine for tests
 os.environ.setdefault("NODES_PER_PV", "30000")
 os.environ.setdefault("MULTIPV", "3")
+os.environ.setdefault("FREE_GAMES_PER_DAY", "100")
+os.environ.setdefault("TRIAL_DAYS", "14")
 
 import importlib
 import api_server
 import stockfish_engine
 importlib.reload(stockfish_engine)
+importlib.reload(api_server)
 
 
 def stockfish_available() -> bool:
@@ -49,7 +60,7 @@ def test_session_flow(client: TestClient):
     assert r2.status_code == 200, r2.text
     data2 = r2.json()
     assert data2.get("legal") is True
-    fb = data2.get("feedback")
+    fb = data2.get("human_feedback")
     assert fb and fb.get("san") == "e4"
     assert "basic" in fb and isinstance(fb["basic"], str)
 

@@ -27,13 +27,16 @@ LLM-ChessCoach is an innovative tool that leverages Large Language Models (LLM),
 ### API (mobile-first)
 Start the API server: `uvicorn api_server:app --reload`.
 
-Auth: set `API_KEY` in environment and include `Authorization: Bearer <API_KEY>` in requests.
+Auth: exchange a Sign in with Apple `identityToken` at `POST /v1/auth/apple`, then send `Authorization: Bearer <backend_token>` on all `/v1/*` requests. In local development, you can still use `Authorization: Bearer <API_KEY>` if `API_KEY` is configured.
 
 Key endpoints:
+- `POST /v1/auth/apple` → `{access_token, expires_in, entitlement}`
+- `GET /v1/entitlements` → current free-trial and paid-game balance
 - `POST /v1/sessions?skill_level=intermediate` → `{session_id, fen_start}`
 - `POST /v1/sessions/{id}/move?move=e4` → per-move feedback (basic)
 - `GET /v1/sessions/{id}/stream?move=e4` (SSE) → `basic` then `extended` events
 - `POST /v1/runs` (body: `pgn`) → full game feedback and summary
+- `POST /v1/purchases/app-store` → verify a StoreKit 2 signed transaction and top up games
 
 ### Legacy UIs
 Streamlit and the previous React demo are available under `legacy/`.
@@ -94,8 +97,13 @@ Click the button above to deploy instantly with pre-configured settings.
 
 3. **Configure Environment Variables**:
    ```bash
-   # Required: Generate secure API key
-   heroku config:set API_KEY=$(openssl rand -hex 32)
+   # Required: backend auth and Apple identifiers
+   heroku config:set BACKEND_AUTH_SECRET=$(openssl rand -hex 32)
+   heroku config:set APPLE_BUNDLE_ID=com.example.llmchesscoach
+   heroku config:set APPLE_APPLE_ID=1234567890
+   heroku config:set DATABASE_URL=postgresql://...
+   heroku config:set APPSTORE_PRODUCT_ID_30_GAMES=com.example.llmchesscoach.games30
+   heroku config:set APPSTORE_ROOT_CERT_PATHS=/app/certs/AppleRootCA-G3.pem,/app/certs/AppleRootCA-G2.pem
 
    # Required: OpenAI or OpenRouter API key
    heroku config:set OPENAI_API_KEY=your-api-key-here
@@ -216,7 +224,7 @@ For production deployment to an Ubuntu VPS (OVHCloud, DigitalOcean, Linode, etc.
 2. **Configure Environment**:
    ```bash
    cp .env.example .env
-   nano .env  # Set API_KEY, OPENAI_API_KEY, ALLOWED_ORIGINS
+   nano .env  # Set DATABASE_URL, BACKEND_AUTH_SECRET, APPLE_BUNDLE_ID, APPLE_APPLE_ID, APPSTORE_PRODUCT_ID_30_GAMES, APPSTORE_ROOT_CERT_PATHS, OPENAI_API_KEY, ALLOWED_ORIGINS
    ```
 
 3. **Set Up SSL** (with domain):
@@ -255,5 +263,4 @@ This project is licensed under the MIT License - see [LICENSE](LICENSE) for deta
 ## Acknowledgements
 - Chess websites for game data.
 - Google Gemini Flash Lite 2.5 for game analysis.
-
 

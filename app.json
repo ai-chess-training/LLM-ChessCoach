@@ -35,9 +35,61 @@
       "value": "production",
       "required": true
     },
-    "API_KEY": {
-      "description": "Secure API key for bearer token authentication. Generate with: openssl rand -hex 32",
+    "BACKEND_AUTH_SECRET": {
+      "description": "Signing secret for backend-issued bearer tokens after Apple authentication",
       "required": true,
+      "generator": "secret"
+    },
+    "APPLE_BUNDLE_ID": {
+      "description": "Production iOS bundle ID used as the Apple identity token audience",
+      "required": true
+    },
+    "APPLE_APPLE_ID": {
+      "description": "Numeric App Store Connect Apple app ID used for production signed-data verification",
+      "required": true
+    },
+    "DATABASE_URL": {
+      "description": "PostgreSQL connection string for user entitlements, usage, and App Store purchases",
+      "required": true
+    },
+    "APPSTORE_PRODUCT_ID_30_GAMES": {
+      "description": "Consumable App Store product ID for the 30-game top-up",
+      "required": true
+    },
+    "APPSTORE_ROOT_CERT_PATHS": {
+      "description": "Comma-separated file paths to Apple root certificate PEMs for signed transaction verification",
+      "required": true
+    },
+    "APPSTORE_ISSUER_ID": {
+      "description": "Optional App Store Server API issuer ID for future server lookups",
+      "required": false
+    },
+    "APPSTORE_KEY_ID": {
+      "description": "Optional App Store Server API key ID for future server lookups",
+      "required": false
+    },
+    "APPSTORE_PRIVATE_KEY": {
+      "description": "Optional App Store Server API private key for future server lookups",
+      "required": false
+    },
+    "FREE_GAMES_PER_DAY": {
+      "description": "Number of free trial games available per UTC day",
+      "value": "5",
+      "required": false
+    },
+    "TRIAL_DAYS": {
+      "description": "Number of days the free trial remains active after first backend auth",
+      "value": "14",
+      "required": false
+    },
+    "APPSTORE_GAMES_PER_PURCHASE": {
+      "description": "How many games a successful App Store consumable grants",
+      "value": "30",
+      "required": false
+    },
+    "API_KEY": {
+      "description": "Optional development-only API key bypass for `/v1/*` when Apple auth is not being exercised",
+      "required": false,
       "generator": "secret"
     },
     "OPENAI_API_KEY": {

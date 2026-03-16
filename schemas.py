@@ -81,3 +81,43 @@ class GameSummary(BaseModel):
     openings: List[str] = Field(default_factory=list)
     critical_positions: List[int] = Field(default_factory=list)
 
+
+class EntitlementStatus(BaseModel):
+    user_id: int
+    trial_started_at: str
+    trial_ends_at: str
+    trial_active: bool
+    daily_free_limit: int
+    daily_free_used: int
+    daily_free_remaining: int
+    paid_games_balance: int
+    total_available_games: int
+    can_play: bool
+
+
+class AppleAuthRequest(BaseModel):
+    identity_token: str
+    nonce: Optional[str] = None
+
+
+class AppleAuthResponse(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
+    expires_in: int
+    entitlement: EntitlementStatus
+
+
+class AppStorePurchaseRequest(BaseModel):
+    signed_transaction_info: str
+
+
+class AppStorePurchaseResponse(BaseModel):
+    transaction_id: str
+    already_processed: bool = False
+    games_changed: int
+    revoked: bool = False
+    entitlement: EntitlementStatus
+
+
+class AppStoreWebhookRequest(BaseModel):
+    signedPayload: str

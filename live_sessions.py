@@ -30,7 +30,13 @@ class SessionManager:
     def __init__(self):
         self.sessions: Dict[str, Dict[str, Any]] = {}
 
-    def create(self, skill_level: str = "intermediate", game_mode: str = "play", start_fen: Optional[str] = None) -> Dict[str, Any]:
+    def create(
+        self,
+        skill_level: str = "intermediate",
+        game_mode: str = "play",
+        start_fen: Optional[str] = None,
+        owner_user_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
         sid = str(uuid.uuid4())
         board = chess.Board(start_fen) if start_fen else chess.Board()
 
@@ -43,6 +49,9 @@ class SessionManager:
             "game_mode": game_mode,  # "play" for interactive play, "training" for analysis only
             "engine_skill_level": skill_config["skill_level"],
             "engine_time_ms": skill_config["move_time_ms"],
+            "owner_user_id": owner_user_id,
+            "game_charged": False,
+            "game_charge_event_key": None,
             "created_at": time.time(),
             "board": board,
             "moves": [],  # list of move feedback dicts
@@ -59,6 +68,12 @@ class SessionManager:
         if sid not in self.sessions:
             raise KeyError("Session not found")
         return self.sessions[sid]
+
+    def save(self, sess: Dict[str, Any]) -> None:
+        sid = sess.get("id")
+        if not sid:
+            raise KeyError("Session id missing")
+        self.sessions[sid] = sess
 
     def _get_engine_move(self, sess: Dict[str, Any]) -> Dict[str, Any]:
         """Get engine move for the current position."""
@@ -269,7 +284,13 @@ class RedisSessionManager(SessionManager):
             logger.error(f"Failed to refresh TTL for session {sid}: {e}")
             raise
 
-    def create(self, skill_level: str = "intermediate", game_mode: str = "play", start_fen: Optional[str] = None) -> Dict[str, Any]:
+    def create(
+        self,
+        skill_level: str = "intermediate",
+        game_mode: str = "play",
+        start_fen: Optional[str] = None,
+        owner_user_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Create a new session in Redis with 24h TTL."""
         sid = str(uuid.uuid4())
         board = chess.Board(start_fen) if start_fen else chess.Board()
@@ -283,6 +304,9 @@ class RedisSessionManager(SessionManager):
             "game_mode": game_mode,
             "engine_skill_level": skill_config["skill_level"],
             "engine_time_ms": skill_config["move_time_ms"],
+            "owner_user_id": owner_user_id,
+            "game_charged": False,
+            "game_charge_event_key": None,
             "created_at": time.time(),
             "board": board,
             "moves": [],
@@ -450,6 +474,17 @@ class RedisSessionManager(SessionManager):
             return self.redis_client.exists(self._session_key(sid)) > 0
         except Exception as e:
             logger.error(f"Failed to check session {sid} existence: {e}")
+            raise
+
+    def save(self, sess: Dict[str, Any]) -> None:
+        sid = sess.get("id")
+        if not sid:
+            raise KeyError("Session id missing")
+        try:
+            serialized = self._serialize_session(sess)
+            self.redis_client.setex(self._session_key(sid), SESSION_TTL, serialized)
+        except Exception as e:
+            logger.error(f"Failed to save session {sid}: {e}")
             raise
 
 

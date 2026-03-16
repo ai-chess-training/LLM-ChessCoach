@@ -6,6 +6,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from typing import Optional
 import logging
 import time
+from io import StringIO
 from pythonjsonlogger import jsonlogger
 
 try:
@@ -21,8 +22,21 @@ from env_loader import load_env
 
 load_env()
 
+from apple_auth import AppleIdentityError, verify_apple_identity_token
+from app_store import AppStoreVerificationError, verify_notification, verify_signed_transaction
+from auth_service import (
+    AuthConfigurationError,
+    AuthContext,
+    AuthError,
+    BACKEND_TOKEN_TTL_SECONDS,
+    authenticate_bearer_token,
+    authenticate_development_api_key,
+    issue_backend_token,
+)
+from entitlements import DatabaseConfigurationError, EntitlementError, EntitlementStore
 from live_sessions import session_manager
 from analysis_pipeline import analyze_pgn_to_feedback
+from schemas import AppleAuthRequest, AppStorePurchaseRequest, AppStoreWebhookRequest
 
 # Import redis for exception handling
 try:
@@ -41,34 +55,54 @@ log_handler = logging.StreamHandler()
 formatter = jsonlogger.JsonFormatter('%(asctime)s %(name)s %(levelname)s %(message)s %(request_id)s')
 log_handler.setFormatter(formatter)
 logger = logging.getLogger(__name__)
-logger.addHandler(log_handler)
+if not logger.handlers:
+    logger.addHandler(log_handler)
+logger.propagate = False
 logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 
 # Environment validation
 def validate_environment():
     """Validate required environment variables on startup."""
     required_vars = []
-    optional_vars = ["OPENAI_API_KEY", "OPENAI_MODEL", "ALLOWED_ORIGINS"]
+    optional_vars = [
+        "OPENAI_API_KEY",
+        "OPENAI_MODEL",
+        "ALLOWED_ORIGINS",
+        "API_KEY",
+        "APPSTORE_ISSUER_ID",
+        "APPSTORE_KEY_ID",
+        "APPSTORE_PRIVATE_KEY",
+    ]
 
-    # In production, API_KEY is required
+    # Production runtime needs durable auth and billing configuration.
     is_production = os.getenv("ENVIRONMENT", "development") == "production"
     if is_production:
-        required_vars.append("API_KEY")
+        required_vars.extend(
+            [
+                "DATABASE_URL",
+                "BACKEND_AUTH_SECRET",
+                "APPLE_BUNDLE_ID",
+                "APPLE_APPLE_ID",
+                "APPSTORE_PRODUCT_ID_30_GAMES",
+                "APPSTORE_ROOT_CERT_PATHS",
+            ]
+        )
 
     missing = [var for var in required_vars if not os.getenv(var)]
     if missing:
         error_msg = f"Missing required environment variables: {', '.join(missing)}"
-        logger.error(error_msg)
+        logger.error(error_msg, extra={"request_id": "startup"})
         raise RuntimeError(error_msg)
 
     # Log warnings for optional but recommended vars
     for var in optional_vars:
         if not os.getenv(var):
-            logger.warning(f"Optional environment variable not set: {var}")
+            logger.warning(f"Optional environment variable not set: {var}", extra={"request_id": "startup"})
 
     logger.info("Environment validation passed", extra={"request_id": "startup"})
 
 validate_environment()
+entitlement_store = EntitlementStore()
 
 # Initialize rate limiter
 limiter = Limiter(key_func=get_remote_address)
@@ -140,41 +174,99 @@ downloader = ChessGameDownloader() if ChessGameDownloader else None
 API_KEY = os.getenv("API_KEY")
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development") == "production"
 
-def require_auth(authorization: Optional[str] = None):
-    """Require bearer token authentication."""
-    if not API_KEY:
-        if IS_PRODUCTION:
-            logger.error("API_KEY not configured in production", extra={"request_id": "auth"})
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Server configuration error"
-            )
-        # Allow in development if no key configured
-        return
 
+def _http_500_config(message: str) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=message)
+
+
+def _unauthorized(detail: str = "Missing or invalid authorization header") -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def _payment_required(error: EntitlementError) -> HTTPException:
+    return HTTPException(status_code=402, detail=error.to_payload())
+
+
+def _get_bearer_token(authorization: Optional[str]) -> str:
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or invalid authorization header",
-            headers={"WWW-Authenticate": "Bearer"}
-        )
-
+        raise _unauthorized()
     try:
-        token = authorization.split(" ", 1)[1].strip()
-    except IndexError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authorization header format",
-            headers={"WWW-Authenticate": "Bearer"}
-        )
+        return authorization.split(" ", 1)[1].strip()
+    except IndexError as exc:
+        raise _unauthorized("Invalid authorization header format") from exc
 
-    if token != API_KEY:
-        logger.warning("Invalid API key attempt", extra={"request_id": "auth"})
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid API key"
-        )
-    return
+
+def _development_context() -> AuthContext:
+    user = entitlement_store.upsert_user("dev-anonymous-user", apple_email="dev@example.com")
+    return AuthContext(
+        user_id=user.id,
+        apple_sub=user.apple_sub,
+        apple_email=user.apple_email,
+        is_development_override=True,
+    )
+
+
+def get_auth_context(authorization: Optional[str] = Header(None)) -> AuthContext:
+    if not authorization:
+        if not IS_PRODUCTION and not API_KEY:
+            return _development_context()
+        raise _unauthorized()
+
+    token = _get_bearer_token(authorization)
+    try:
+        return authenticate_bearer_token(token, entitlement_store)
+    except (AuthError, AuthConfigurationError):
+        if not IS_PRODUCTION and API_KEY:
+            try:
+                return authenticate_development_api_key(token, entitlement_store)
+            except AuthError:
+                pass
+        raise _unauthorized("Invalid bearer token")
+
+
+def _load_owned_session(session_id: str, user_id: int) -> dict:
+    sess = session_manager.get(session_id)
+    owner_user_id = sess.get("owner_user_id")
+    if owner_user_id is None and not IS_PRODUCTION:
+        sess["owner_user_id"] = user_id
+        session_manager.save(sess)
+        return sess
+    if owner_user_id != user_id:
+        raise KeyError("Session not found")
+    return sess
+
+
+def _ensure_can_play(user_id: int):
+    try:
+        return entitlement_store.assert_can_play(user_id)
+    except EntitlementError as exc:
+        raise _payment_required(exc)
+
+
+def _consume_session_game(sess: dict, user_id: int):
+    if sess.get("game_charged"):
+        return
+    try:
+        entitlement_store.consume_game(user_id, f"session:{sess['id']}", source="live_game")
+    except EntitlementError as exc:
+        raise _payment_required(exc)
+    sess["game_charged"] = True
+    sess["game_charge_event_key"] = f"session:{sess['id']}"
+    session_manager.save(sess)
+
+
+def _validate_pgn_payload(pgn: str) -> None:
+    if len(pgn) > 100000:
+        raise HTTPException(status_code=400, detail="PGN too large (max 100KB)")
+    import chess.pgn
+
+    game = chess.pgn.read_game(StringIO(pgn))
+    if game is None or game.end().board().move_stack == []:
+        raise HTTPException(status_code=400, detail="Invalid or empty PGN")
 
 # Health check endpoints
 @app.get("/health", tags=["Health"])
@@ -297,17 +389,116 @@ async def dashboard(username: str):
 # v1 Mobile-first API
 # --------------------
 
+@app.post("/v1/auth/apple", tags=["Auth"])
+@limiter.limit("30/minute")
+async def auth_with_apple(payload: AppleAuthRequest):
+    try:
+        claims = verify_apple_identity_token(payload.identity_token, payload.nonce)
+        user = entitlement_store.upsert_user(
+            str(claims["sub"]),
+            apple_email=claims.get("email"),
+        )
+        return {
+            "access_token": issue_backend_token(user),
+            "token_type": "bearer",
+            "expires_in": BACKEND_TOKEN_TTL_SECONDS,
+            "entitlement": entitlement_store.get_entitlement_snapshot(user.id).to_dict(),
+        }
+    except AppleIdentityError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except (AuthConfigurationError, DatabaseConfigurationError) as exc:
+        raise _http_500_config(str(exc)) from exc
+
+
+@app.get("/v1/entitlements", tags=["Auth"])
+@limiter.limit("60/minute")
+async def get_entitlements(current_user: AuthContext = Depends(get_auth_context)):
+    return entitlement_store.get_entitlement_snapshot(current_user.user_id).to_dict()
+
+
+@app.post("/v1/purchases/app-store", tags=["Billing"])
+@limiter.limit("20/minute")
+async def process_app_store_purchase(
+    payload: AppStorePurchaseRequest,
+    current_user: AuthContext = Depends(get_auth_context),
+):
+    try:
+        transaction = verify_signed_transaction(payload.signed_transaction_info)
+        purchase = entitlement_store.apply_app_store_transaction(
+            user_id=current_user.user_id,
+            transaction_id=transaction.transaction_id,
+            original_transaction_id=transaction.original_transaction_id,
+            product_id=transaction.product_id,
+            environment=transaction.environment,
+            signed_transaction_info=transaction.signed_transaction_info,
+            revoked=bool(transaction.revocation_date),
+        )
+        return {
+            "transaction_id": transaction.transaction_id,
+            "already_processed": purchase.already_processed,
+            "games_changed": purchase.games_changed,
+            "revoked": purchase.revoked,
+            "entitlement": purchase.snapshot.to_dict(),
+        }
+    except AppStoreVerificationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/v1/webhooks/app-store", tags=["Billing"])
+@limiter.limit("60/minute")
+async def handle_app_store_webhook(payload: AppStoreWebhookRequest):
+    try:
+        notification = verify_notification(payload.signedPayload)
+    except AppStoreVerificationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not notification.transaction:
+        return {"status": "ignored", "reason": "missing_transaction"}
+
+    existing = entitlement_store.get_transaction(notification.transaction.transaction_id)
+    if not existing:
+        logger.warning(
+            "Ignoring App Store notification for unknown transaction",
+            extra={"request_id": "app_store_webhook", "transaction_id": notification.transaction.transaction_id},
+        )
+        return {"status": "ignored", "reason": "unknown_transaction"}
+
+    revoked = bool(notification.transaction.revocation_date) or notification.notification_type.upper() in {"REFUND", "REVOKE"}
+    purchase = entitlement_store.apply_app_store_transaction(
+        user_id=int(existing["user_id"]),
+        transaction_id=notification.transaction.transaction_id,
+        original_transaction_id=notification.transaction.original_transaction_id,
+        product_id=notification.transaction.product_id,
+        environment=notification.transaction.environment,
+        signed_transaction_info=notification.transaction.signed_transaction_info,
+        notification_type=notification.notification_type,
+        revoked=revoked,
+    )
+    return {
+        "status": "processed",
+        "notification_type": notification.notification_type,
+        "already_processed": purchase.already_processed,
+        "games_changed": purchase.games_changed,
+    }
+
+
 @app.post("/v1/sessions", tags=["Sessions"])
 @limiter.limit("10/minute")
 async def create_session(
     request: Request,
     skill_level: str = "intermediate",
     game_mode: str = "play",
-    authorization: Optional[str] = Header(None)
+    current_user: AuthContext = Depends(get_auth_context),
 ):
     """Create a new chess coaching session."""
-    require_auth(authorization)
-    return session_manager.create(skill_level=skill_level, game_mode=game_mode)
+    _ensure_can_play(current_user.user_id)
+    return session_manager.create(
+        skill_level=skill_level,
+        game_mode=game_mode,
+        owner_user_id=current_user.user_id,
+    )
 
 
 @app.get("/v1/sessions/{session_id}", tags=["Sessions"])
@@ -315,11 +506,11 @@ async def create_session(
 async def get_session(
     request: Request,
     session_id: str,
-    authorization: Optional[str] = Header(None)
+    current_user: AuthContext = Depends(get_auth_context),
 ):
     """Get the current state of a session."""
-    require_auth(authorization)
     try:
+        _load_owned_session(session_id, current_user.user_id)
         return session_manager.snapshot(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -339,11 +530,16 @@ async def play_move(
     request: Request,
     session_id: str,
     move: str,
-    authorization: Optional[str] = Header(None)
+    current_user: AuthContext = Depends(get_auth_context),
 ):
     """Submit a move and get coaching feedback."""
-    require_auth(authorization)
     try:
+        sess = _load_owned_session(session_id, current_user.user_id)
+        board = sess["board"]
+        parsed_move, _, _ = session_manager._parse_move(board, move)
+        if parsed_move is None or parsed_move not in board.legal_moves:
+            raise HTTPException(status_code=400, detail="Illegal move")
+        _consume_session_game(sess, current_user.user_id)
         result = await session_manager.apply_move(session_id, move)
         if not result.get("legal"):
             raise HTTPException(status_code=400, detail=result.get("error", "Illegal move"))
@@ -376,39 +572,32 @@ async def stream_move(
     request: Request,
     session_id: str,
     move: str,
-    authorization: Optional[str] = Header(None)
+    current_user: AuthContext = Depends(get_auth_context),
 ):
     """SSE stream: emits a quick 'basic' event."""
-    require_auth(authorization)
+    try:
+        sess = _load_owned_session(session_id, current_user.user_id)
+        board = sess["board"]
+        m, san, uci = session_manager._parse_move(board, move)
+        if m is None or m not in board.legal_moves:
+            raise HTTPException(status_code=400, detail="Illegal move")
+        _consume_session_game(sess, current_user.user_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        if REDIS_AVAILABLE and redis and isinstance(e, (redis.RedisError, redis.ConnectionError)):
+            logger.error(f"Redis error in stream_move setup: {e}")
+            raise HTTPException(status_code=503, detail="Session storage temporarily unavailable")
+        logger.error(f"Unexpected error in stream_move setup: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
     async def event_gen():
         # Compute using the same internal pipeline but split into two phases
         from stockfish_engine import StockfishAnalyzer, DEFAULT_MULTIPV
         from llm_coach import rule_basic, coach_move_with_llm, severity_from_cp_loss
         import chess
-
-        try:
-            sess = session_manager.get(session_id)
-        except KeyError:
-            yield f"event: error\ndata: {json.dumps({'error':'Session not found'})}\n\n"
-            return
-        except Exception as e:
-            # Handle Redis connection errors
-            if REDIS_AVAILABLE and redis and isinstance(e, (redis.RedisError, redis.ConnectionError)):
-                logger.error(f"Redis error in stream_move: {e}")
-                yield f"event: error\ndata: {json.dumps({'error':'Session storage temporarily unavailable'})}\n\n"
-                return
-            # Handle other errors
-            logger.error(f"Unexpected error in stream_move: {e}")
-            yield f"event: error\ndata: {json.dumps({'error':'Internal server error'})}\n\n"
-            return
-
-        board: chess.Board = sess["board"]
-        # Parse move
-        m, san, uci = session_manager._parse_move(board, move)
-        if m is None or m not in board.legal_moves:
-            yield f"event: error\ndata: {json.dumps({'error':'Illegal move'})}\n\n"
-            return
 
         fen_before = board.fen()
         side = "white" if board.turn else "black"
@@ -477,12 +666,8 @@ async def stream_move(
             "multipv": multipv,
         }
 
-        print(full_payload)
-
         level = sess.get("skill_level", "intermediate")
         coach = await coach_move_with_llm(full_payload, level=level)
-
-        print(coach)
 
         full_payload.update(
             {
@@ -530,6 +715,8 @@ async def stream_move(
 
                 yield f"event: engine_move\ndata: {json.dumps(engine_payload)}\n\n"
 
+        session_manager.save(sess)
+
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
@@ -539,14 +726,17 @@ async def run_batch_analysis(
     request: Request,
     pgn: str = Form(...),
     level: str = Form("intermediate"),
-    authorization: Optional[str] = Header(None),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+    current_user: AuthContext = Depends(get_auth_context),
 ):
     """Run batch analysis on a complete PGN game."""
-    require_auth(authorization)
+    _validate_pgn_payload(pgn)
 
-    # Validate PGN size
-    if len(pgn) > 100000:  # ~100KB limit
-        raise HTTPException(status_code=400, detail="PGN too large (max 100KB)")
+    event_key = f"run:{current_user.user_id}:{idempotency_key}" if idempotency_key else f"run:{request.state.request_id}"
+    try:
+        entitlement_store.consume_game(current_user.user_id, event_key, source="batch_run")
+    except EntitlementError as exc:
+        raise _payment_required(exc)
 
     summary = await analyze_pgn_to_feedback(pgn, level=level)
     if not summary:
