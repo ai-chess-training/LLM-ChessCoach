@@ -5,6 +5,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from typing import Optional
 import logging
+import re
 import time
 from io import StringIO
 from pythonjsonlogger import jsonlogger
@@ -36,6 +37,8 @@ from auth_service import (
 from entitlements import DatabaseConfigurationError, EntitlementError, EntitlementStore
 from live_sessions import session_manager
 from analysis_pipeline import analyze_pgn_to_feedback
+from config import SSE_QUICK_NODES
+from move_analysis import build_move_feedback, severity_from_cp_loss
 from schemas import AppleAuthRequest, AppStorePurchaseRequest, AppStoreWebhookRequest
 
 # Import redis for exception handling
@@ -331,7 +334,7 @@ async def readiness_check():
         content={"status": "ready" if all_ok else "not_ready", "checks": checks}
     )
 
-@app.post("/api/analyze")
+@app.post("/api/analyze", deprecated=True)
 async def analyze(date: str):
     if not downloader:
         return {"error": "Downloader unavailable"}
@@ -344,11 +347,14 @@ async def analyze(date: str):
 
 @app.get("/api/analysis/{run_id}")
 async def get_analysis(run_id: str):
+    response = JSONResponse(content={})
+    response.headers["Deprecation"] = "true"
+    if not re.match(r'^[a-zA-Z0-9_-]+$', run_id):
+        raise HTTPException(status_code=400, detail="Invalid run_id")
     base_dir = os.path.abspath('games')
     analysis_root = os.path.normpath(os.path.join(base_dir, run_id, 'analysis'))
     result = {}
     if not analysis_root.startswith(base_dir):
-        # Prevent path traversal
         return {}
     if os.path.exists(analysis_root):
         for file in os.listdir(analysis_root):
@@ -371,14 +377,14 @@ def save_schedules(data):
     with open(SCHEDULE_FILE, 'w') as f:
         json.dump(data, f)
 
-@app.post("/api/schedule")
+@app.post("/api/schedule", deprecated=True)
 async def add_schedule(date: str, frequency: str):
     schedules = load_schedules()
     schedules.append({'date': date, 'frequency': frequency, 'id': str(uuid.uuid4())})
     save_schedules(schedules)
     return {"status": "scheduled"}
 
-@app.get("/api/dashboard/{username}")
+@app.get("/api/dashboard/{username}", deprecated=True)
 async def dashboard(username: str):
     # Placeholder summary
     schedules = load_schedules()
@@ -425,15 +431,28 @@ async def process_app_store_purchase(
 ):
     try:
         transaction = verify_signed_transaction(payload.signed_transaction_info)
-        purchase = entitlement_store.apply_app_store_transaction(
-            user_id=current_user.user_id,
-            transaction_id=transaction.transaction_id,
-            original_transaction_id=transaction.original_transaction_id,
-            product_id=transaction.product_id,
-            environment=transaction.environment,
-            signed_transaction_info=transaction.signed_transaction_info,
-            revoked=bool(transaction.revocation_date),
-        )
+
+        # Route subscription vs consumable purchases
+        subscription_product_id = os.getenv("APPSTORE_PRODUCT_ID_SUBSCRIPTION", "")
+        if subscription_product_id and transaction.product_id == subscription_product_id:
+            purchase = entitlement_store.activate_subscription(
+                user_id=current_user.user_id,
+                original_transaction_id=transaction.original_transaction_id or transaction.transaction_id,
+                transaction_id=transaction.transaction_id,
+                product_id=transaction.product_id,
+                environment=transaction.environment,
+                signed_transaction_info=transaction.signed_transaction_info,
+            )
+        else:
+            purchase = entitlement_store.apply_app_store_transaction(
+                user_id=current_user.user_id,
+                transaction_id=transaction.transaction_id,
+                original_transaction_id=transaction.original_transaction_id,
+                product_id=transaction.product_id,
+                environment=transaction.environment,
+                signed_transaction_info=transaction.signed_transaction_info,
+                revoked=bool(transaction.revocation_date),
+            )
         return {
             "transaction_id": transaction.transaction_id,
             "already_processed": purchase.already_processed,
@@ -447,6 +466,13 @@ async def process_app_store_purchase(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+_SUBSCRIPTION_NOTIFICATION_TYPES = {
+    "DID_RENEW", "DID_CHANGE_RENEWAL_STATUS", "EXPIRED",
+    "DID_FAIL_TO_RENEW", "GRACE_PERIOD_EXPIRED", "SUBSCRIBED",
+    "OFFER_REDEEMED", "DID_CHANGE_RENEWAL_INFO",
+}
+
+
 @app.post("/v1/webhooks/app-store", tags=["Billing"])
 @limiter.limit("60/minute")
 async def handle_app_store_webhook(request: Request, payload: AppStoreWebhookRequest):
@@ -458,22 +484,70 @@ async def handle_app_store_webhook(request: Request, payload: AppStoreWebhookReq
     if not notification.transaction:
         return {"status": "ignored", "reason": "missing_transaction"}
 
-    existing = entitlement_store.get_transaction(notification.transaction.transaction_id)
+    ntype = notification.notification_type.upper()
+    txn = notification.transaction
+
+    # --- Subscription lifecycle notifications ---
+    if ntype in _SUBSCRIPTION_NOTIFICATION_TYPES:
+        sub = entitlement_store.get_subscription_by_original_txn(
+            txn.original_transaction_id or txn.transaction_id,
+        )
+        if not sub:
+            logger.warning(
+                "Subscription notification for unknown subscription",
+                extra={"request_id": "app_store_webhook", "original_transaction_id": txn.original_transaction_id},
+            )
+            return {"status": "ignored", "reason": "unknown_subscription"}
+
+        user_id = int(sub["user_id"])
+
+        if ntype in ("DID_RENEW", "SUBSCRIBED", "OFFER_REDEEMED"):
+            result = entitlement_store.renew_subscription(
+                user_id=user_id,
+                original_transaction_id=txn.original_transaction_id or txn.transaction_id,
+                transaction_id=txn.transaction_id,
+                product_id=txn.product_id,
+                environment=txn.environment,
+                signed_transaction_info=txn.signed_transaction_info,
+            )
+            return {"status": "processed", "notification_type": ntype, "games_granted": result.games_changed}
+
+        if ntype == "EXPIRED" or ntype == "GRACE_PERIOD_EXPIRED":
+            entitlement_store.expire_subscription(user_id, txn.original_transaction_id or txn.transaction_id)
+            return {"status": "processed", "notification_type": ntype}
+
+        if ntype == "DID_FAIL_TO_RENEW":
+            entitlement_store.update_subscription_status(
+                user_id, txn.original_transaction_id or txn.transaction_id, "billing_retry",
+            )
+            return {"status": "processed", "notification_type": ntype}
+
+        if ntype in ("DID_CHANGE_RENEWAL_STATUS", "DID_CHANGE_RENEWAL_INFO"):
+            entitlement_store.update_subscription_auto_renew(
+                user_id, txn.original_transaction_id or txn.transaction_id,
+                auto_renew=not (notification.subtype and notification.subtype.upper() == "AUTO_RENEW_DISABLED"),
+            )
+            return {"status": "processed", "notification_type": ntype}
+
+        return {"status": "ignored", "reason": "unhandled_subscription_type"}
+
+    # --- Consumable / refund notifications ---
+    existing = entitlement_store.get_transaction(txn.transaction_id)
     if not existing:
         logger.warning(
             "Ignoring App Store notification for unknown transaction",
-            extra={"request_id": "app_store_webhook", "transaction_id": notification.transaction.transaction_id},
+            extra={"request_id": "app_store_webhook", "transaction_id": txn.transaction_id},
         )
         return {"status": "ignored", "reason": "unknown_transaction"}
 
-    revoked = bool(notification.transaction.revocation_date) or notification.notification_type.upper() in {"REFUND", "REVOKE"}
+    revoked = bool(txn.revocation_date) or ntype in {"REFUND", "REVOKE"}
     purchase = entitlement_store.apply_app_store_transaction(
         user_id=int(existing["user_id"]),
-        transaction_id=notification.transaction.transaction_id,
-        original_transaction_id=notification.transaction.original_transaction_id,
-        product_id=notification.transaction.product_id,
-        environment=notification.transaction.environment,
-        signed_transaction_info=notification.transaction.signed_transaction_info,
+        transaction_id=txn.transaction_id,
+        original_transaction_id=txn.original_transaction_id,
+        product_id=txn.product_id,
+        environment=txn.environment,
+        signed_transaction_info=txn.signed_transaction_info,
         notification_type=notification.notification_type,
         revoked=revoked,
     )
@@ -595,125 +669,76 @@ async def stream_move(
         raise HTTPException(status_code=500, detail="Internal server error")
 
     async def event_gen():
-        # Compute using the same internal pipeline but split into two phases
         from stockfish_engine import StockfishAnalyzer, DEFAULT_MULTIPV
-        from llm_coach import rule_basic, coach_move_with_llm, severity_from_cp_loss
+        from llm_coach import rule_basic, coach_move_with_llm
         import chess
 
         fen_before = board.fen()
         side = "white" if board.turn else "black"
+        mover_is_white = (side == "white")
+        move_no = len(sess["moves"]) + 1
 
         # Phase 1: quick analysis for basic comment
-        with StockfishAnalyzer(multipv=DEFAULT_MULTIPV, nodes_per_pv=50_000) as analyzer:
+        with StockfishAnalyzer(multipv=DEFAULT_MULTIPV, nodes_per_pv=SSE_QUICK_NODES) as analyzer:
             eval_before = analyzer.analyze_position(board)
             comparison = analyzer.compare_move(board, m)
 
-        # Build basic feedback object
-        before_cp_white = eval_before.get("score", {}).get("cp")
-        after_cp_white = comparison.get("eval_after", {}).get("score", {}).get("cp")
-        mover_is_white = (side == "white")
-        cp_before = before_cp_white if mover_is_white else (-before_cp_white if before_cp_white is not None else None)
-        cp_after = after_cp_white if mover_is_white else (-after_cp_white if after_cp_white is not None else None)
-        cp_loss = comparison.get("eval_loss", 0.0)
-        best_move_san = eval_before.get("best_move_san")
-        multipv = eval_before.get("pv", [])
-
-        basic_payload = {
-            "move_no": len(sess["moves"]) + 1,
-            "side": side,
-            "san": san,
-            "uci": uci,
-            "fen_before": fen_before,
-            "cp_before": cp_before,
-            "cp_after": cp_after,
-            "cp_loss": cp_loss,
-            "severity": severity_from_cp_loss(cp_loss),
-            "best_move_san": best_move_san,
-            "multipv": multipv,
-        }
+        basic_payload = build_move_feedback(
+            move_no=move_no, side=side, san=san, uci=uci,
+            fen_before=fen_before, fen_after="",
+            eval_before=eval_before, comparison=comparison,
+            mover_is_white=mover_is_white,
+        )
         basic_text = rule_basic(basic_payload)
         yield f"event: basic\ndata: {json.dumps({'basic': basic_text, 'preview': basic_payload})}\n\n"
 
-        # Phase 2: full analysis for extended
+        # Phase 2: full analysis for extended coaching
         with StockfishAnalyzer(multipv=DEFAULT_MULTIPV) as analyzer:
-            # recompute with full budget (~1M per PV configured in analyzer)
             eval_before_full = analyzer.analyze_position(board)
             comparison_full = analyzer.compare_move(board, m)
 
-        # Push the move in session now
         board.push(m)
         fen_after = board.fen()
 
-        before_cp_white = eval_before_full.get("score", {}).get("cp")
-        after_cp_white = comparison_full.get("eval_after", {}).get("score", {}).get("cp")
-        cp_before = before_cp_white if mover_is_white else (-before_cp_white if before_cp_white is not None else None)
-        cp_after = after_cp_white if mover_is_white else (-after_cp_white if after_cp_white is not None else None)
-        cp_loss = comparison_full.get("eval_loss", 0.0)
-        best_move_san = eval_before_full.get("best_move_san")
-        multipv = eval_before_full.get("pv", [])
-
-        full_payload = {
-            "move_no": len(sess["moves"]) + 1,
-            "side": side,
-            "san": san,
-            "uci": uci,
-            "fen_before": fen_before,
-            "fen_after": fen_after,
-            "cp_before": cp_before,
-            "cp_after": cp_after,
-            "cp_loss": cp_loss,
-            "severity": severity_from_cp_loss(cp_loss),
-            "best_move_san": best_move_san,
-            "multipv": multipv,
-        }
+        full_payload = build_move_feedback(
+            move_no=move_no, side=side, san=san, uci=uci,
+            fen_before=fen_before, fen_after=fen_after,
+            eval_before=eval_before_full, comparison=comparison_full,
+            mover_is_white=mover_is_white,
+        )
 
         level = sess.get("skill_level", "intermediate")
         coach = await coach_move_with_llm(full_payload, level=level)
+        full_payload["basic"] = coach.get("basic")
+        full_payload["extended"] = coach.get("extended")
 
-        full_payload.update(
-            {
-                "basic": coach.get("basic"),
-                "extended": coach.get("extended"),
-            }
-        )
-
-        # Save to session moves
         sess["moves"].append(full_payload)
-
         yield f"event: extended\ndata: {json.dumps(full_payload)}\n\n"
 
-        # Get engine move if in play mode
+        # Engine move in play mode
         if sess.get("game_mode") == "play" and not board.is_game_over():
-            from stockfish_engine import SKILL_LEVEL_MAPPINGS
+            from config import SKILL_LEVEL_MAPPINGS
             skill_config = SKILL_LEVEL_MAPPINGS.get(sess.get("skill_level", "intermediate"))
-
             with StockfishAnalyzer(skill_level=skill_config["skill_level"]) as analyzer:
                 engine_response = analyzer.get_engine_move(board, time_limit_ms=skill_config["move_time_ms"])
-
             if engine_response.get("move_uci"):
-                # Apply engine move
                 engine_move = chess.Move.from_uci(engine_response["move_uci"])
                 board.push(engine_move)
-
                 engine_payload = {
                     "san": engine_response.get("move_san"),
                     "uci": engine_response.get("move_uci"),
                     "fen_after": board.fen(),
                     "score": engine_response.get("score", {}),
-                    "skill_level": skill_config["skill_level"]
+                    "skill_level": skill_config["skill_level"],
                 }
-
-                # Store engine move in session
-                engine_feedback = {
+                sess["moves"].append({
                     "move_no": len(sess["moves"]),
                     "side": "white" if board.turn == chess.BLACK else "black",
                     "san": engine_response.get("move_san"),
                     "uci": engine_response.get("move_uci"),
                     "fen_after": board.fen(),
-                    "is_engine_move": True
-                }
-                sess["moves"].append(engine_feedback)
-
+                    "is_engine_move": True,
+                })
                 yield f"event: engine_move\ndata: {json.dumps(engine_payload)}\n\n"
 
         session_manager.save(sess)
@@ -743,3 +768,21 @@ async def run_batch_analysis(
     if not summary:
         raise HTTPException(status_code=400, detail="Invalid or empty PGN")
     return summary
+
+
+@app.post("/v1/sessions/{session_id}/undo", tags=["Sessions"])
+@limiter.limit("30/minute")
+async def undo_move(
+    request: Request,
+    session_id: str,
+    current_user: AuthContext = Depends(get_auth_context),
+):
+    """Undo the last move (and engine response in play mode). Does not refund game credits."""
+    try:
+        _load_owned_session(session_id, current_user.user_id)
+        result = session_manager.undo_last_move(session_id)
+        return result
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))

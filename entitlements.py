@@ -28,19 +28,28 @@ def _utc_date_str(value: datetime) -> str:
 
 
 def _default_database_url() -> str:
-    return "sqlite:////tmp/llm_chesscoach_entitlements.db"
+    data_dir = os.getenv("DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
+    os.makedirs(data_dir, exist_ok=True)
+    return f"sqlite:///{os.path.join(data_dir, 'llm_chesscoach_entitlements.db')}"
 
 
 def _free_games_per_day() -> int:
-    return int(os.getenv("FREE_GAMES_PER_DAY", "5"))
+    return int(os.getenv("FREE_GAMES_PER_DAY", "1"))
 
 
 def _trial_days() -> int:
-    return int(os.getenv("TRIAL_DAYS", "14"))
+    return int(os.getenv("TRIAL_DAYS", "90"))
 
 
 def _app_store_games_pack() -> int:
     return int(os.getenv("APPSTORE_GAMES_PER_PURCHASE", "30"))
+
+
+def _subscription_games_per_month() -> int:
+    return int(os.getenv("SUBSCRIPTION_GAMES_PER_MONTH", "100"))
+
+
+SUBSCRIPTION_ROLLOVER_MONTHS = 2
 
 
 @dataclass
@@ -64,6 +73,12 @@ class EntitlementSnapshot:
     paid_games_balance: int
     total_available_games: int
     can_play: bool
+    # Subscription fields
+    subscription_active: bool = False
+    subscription_product_id: Optional[str] = None
+    subscription_period_end: Optional[str] = None
+    subscription_auto_renew: bool = False
+    subscription_games_remaining: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -190,6 +205,43 @@ class EntitlementStore:
                     FOREIGN KEY (user_id) REFERENCES users(id)
                 )
                 """,
+                """
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    original_transaction_id TEXT NOT NULL UNIQUE,
+                    product_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    current_period_start TEXT NOT NULL,
+                    current_period_end TEXT NOT NULL,
+                    auto_renew_enabled INTEGER NOT NULL DEFAULT 1,
+                    environment TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(id)
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS subscription_game_credits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    subscription_id INTEGER NOT NULL,
+                    credits_granted INTEGER NOT NULL DEFAULT 100,
+                    credits_remaining INTEGER NOT NULL DEFAULT 100,
+                    period_start TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(id),
+                    FOREIGN KEY (subscription_id) REFERENCES subscriptions(id)
+                )
+                """,
+                # Indexes
+                "CREATE INDEX IF NOT EXISTS idx_usage_events_user ON usage_events(user_id)",
+                "CREATE INDEX IF NOT EXISTS idx_app_store_txn_user ON app_store_transactions(user_id)",
+                "CREATE INDEX IF NOT EXISTS idx_app_store_txn_original ON app_store_transactions(original_transaction_id)",
+                "CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id)",
+                "CREATE INDEX IF NOT EXISTS idx_sub_credits_user ON subscription_game_credits(user_id)",
+                "CREATE INDEX IF NOT EXISTS idx_sub_credits_expires ON subscription_game_credits(expires_at)",
             ]
         return [
             """
@@ -243,6 +295,40 @@ class EntitlementStore:
                 updated_at TEXT NOT NULL
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL REFERENCES users(id),
+                original_transaction_id TEXT NOT NULL UNIQUE,
+                product_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                current_period_start TEXT NOT NULL,
+                current_period_end TEXT NOT NULL,
+                auto_renew_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                environment TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS subscription_game_credits (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL REFERENCES users(id),
+                subscription_id BIGINT NOT NULL REFERENCES subscriptions(id),
+                credits_granted INTEGER NOT NULL DEFAULT 100,
+                credits_remaining INTEGER NOT NULL DEFAULT 100,
+                period_start TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """,
+            # Indexes
+            "CREATE INDEX IF NOT EXISTS idx_usage_events_user ON usage_events(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_app_store_txn_user ON app_store_transactions(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_app_store_txn_original ON app_store_transactions(original_transaction_id)",
+            "CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_sub_credits_user ON subscription_game_credits(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_sub_credits_expires ON subscription_game_credits(expires_at)",
         ]
 
     @contextmanager
@@ -400,7 +486,32 @@ class EntitlementStore:
         daily_limit = _free_games_per_day() if trial_active else 0
         daily_remaining = max(daily_limit - used_games, 0)
         paid_balance = int(entitlement["paid_games_balance"])
-        total_available = daily_remaining + max(paid_balance, 0)
+
+        # Subscription data
+        now_iso = _isoformat(now)
+        sub_row = self._fetchone(
+            conn,
+            "SELECT * FROM subscriptions WHERE user_id = ? AND status IN ('active', 'billing_retry') ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        )
+        sub_active = False
+        sub_product_id = None
+        sub_period_end = None
+        sub_auto_renew = False
+        sub_games_remaining = 0
+        if sub_row:
+            sub_active = True
+            sub_product_id = sub_row.get("product_id")
+            sub_period_end = sub_row.get("current_period_end")
+            sub_auto_renew = bool(sub_row.get("auto_renew_enabled"))
+            credits_row = self._fetchone(
+                conn,
+                "SELECT COALESCE(SUM(credits_remaining), 0) AS total FROM subscription_game_credits WHERE user_id = ? AND expires_at > ?",
+                (user_id, now_iso),
+            )
+            sub_games_remaining = int(credits_row["total"]) if credits_row else 0
+
+        total_available = daily_remaining + sub_games_remaining + max(paid_balance, 0)
         return EntitlementSnapshot(
             user_id=user_id,
             trial_started_at=_isoformat(trial_started_at),
@@ -411,7 +522,12 @@ class EntitlementStore:
             daily_free_remaining=daily_remaining,
             paid_games_balance=paid_balance,
             total_available_games=total_available,
-            can_play=(daily_remaining > 0 or paid_balance > 0),
+            can_play=(daily_remaining > 0 or sub_games_remaining > 0 or paid_balance > 0),
+            subscription_active=sub_active,
+            subscription_product_id=sub_product_id,
+            subscription_period_end=sub_period_end,
+            subscription_auto_renew=sub_auto_renew,
+            subscription_games_remaining=sub_games_remaining,
         )
 
     def assert_can_play(self, user_id: int, now: Optional[datetime] = None) -> EntitlementSnapshot:
@@ -437,6 +553,8 @@ class EntitlementStore:
                 return UsageResult(consumed=False, charge_kind=str(existing["charge_kind"]), snapshot=snapshot)
 
             snapshot = self._read_snapshot(conn, user_id, current_time, entitlement_row=entitlement)
+
+            # Consumption priority: free trial -> subscription credits -> paid balance
             if snapshot.trial_active and snapshot.daily_free_remaining > 0:
                 self._execute(
                     conn,
@@ -448,6 +566,8 @@ class EntitlementStore:
                     (user_id, usage_date),
                 )
                 charge_kind = "free_trial"
+            elif self._consume_subscription_credit(conn, user_id, current_time):
+                charge_kind = "subscription"
             elif snapshot.paid_games_balance > 0:
                 self._execute(
                     conn,
@@ -621,3 +741,207 @@ class EntitlementStore:
                 games_changed=applied_delta,
                 snapshot=snapshot,
             )
+
+    # ------------------------------------------------------------------
+    # Subscription helpers
+    # ------------------------------------------------------------------
+
+    def _consume_subscription_credit(self, conn: Any, user_id: int, now: datetime) -> bool:
+        """Consume one subscription credit from the oldest non-expired bucket. Returns True if consumed."""
+        now_iso = _isoformat(now)
+        row = self._fetchone(
+            conn,
+            """
+            SELECT id, credits_remaining FROM subscription_game_credits
+            WHERE user_id = ? AND expires_at > ? AND credits_remaining > 0
+            ORDER BY period_start ASC LIMIT 1
+            """,
+            (user_id, now_iso),
+        )
+        if not row:
+            return False
+        self._execute(
+            conn,
+            "UPDATE subscription_game_credits SET credits_remaining = credits_remaining - 1 WHERE id = ?",
+            (row["id"],),
+        )
+        return True
+
+    def get_subscription_by_original_txn(self, original_transaction_id: str) -> Optional[Dict[str, Any]]:
+        with self._connection() as conn:
+            return self._fetchone(
+                conn,
+                "SELECT * FROM subscriptions WHERE original_transaction_id = ?",
+                (original_transaction_id,),
+            )
+
+    def activate_subscription(
+        self,
+        user_id: int,
+        original_transaction_id: str,
+        transaction_id: str,
+        product_id: str,
+        environment: str,
+        signed_transaction_info: str,
+        now: Optional[datetime] = None,
+    ) -> PurchaseResult:
+        """Handle initial subscription purchase from the client."""
+        current_time = now or utc_now()
+        now_iso = _isoformat(current_time)
+        period_end = current_time + timedelta(days=31)
+        period_end_iso = _isoformat(period_end)
+        games = _subscription_games_per_month()
+        expires_at = current_time + timedelta(days=31 * (1 + SUBSCRIPTION_ROLLOVER_MONTHS))
+        expires_iso = _isoformat(expires_at)
+
+        with self._connection(write=True) as conn:
+            self._lock_entitlement(conn, user_id, current_time)
+
+            # Check idempotency
+            existing_sub = self._fetchone(
+                conn,
+                "SELECT id FROM subscriptions WHERE original_transaction_id = ?",
+                (original_transaction_id,),
+            )
+            if existing_sub:
+                snapshot = self._read_snapshot(conn, user_id, current_time)
+                self._commit(conn)
+                return PurchaseResult(applied=False, revoked=False, already_processed=True, games_changed=0, snapshot=snapshot)
+
+            self._execute(
+                conn,
+                """
+                INSERT INTO subscriptions (user_id, original_transaction_id, product_id, status, current_period_start, current_period_end, auto_renew_enabled, environment, created_at, updated_at)
+                VALUES (?, ?, ?, 'active', ?, ?, 1, ?, ?, ?)
+                """,
+                (user_id, original_transaction_id, product_id, now_iso, period_end_iso, environment, now_iso, now_iso),
+            )
+            sub_row = self._fetchone(conn, "SELECT id FROM subscriptions WHERE original_transaction_id = ?", (original_transaction_id,))
+            sub_id = int(sub_row["id"])
+
+            self._execute(
+                conn,
+                """
+                INSERT INTO subscription_game_credits (user_id, subscription_id, credits_granted, credits_remaining, period_start, expires_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, sub_id, games, games, now_iso, expires_iso, now_iso),
+            )
+
+            # Record transaction
+            self._execute(
+                conn,
+                """
+                INSERT INTO app_store_transactions (transaction_id, original_transaction_id, user_id, product_id, environment, signed_transaction_info, status, games_granted, notification_type, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'subscription', ?, NULL, ?, ?)
+                """,
+                (transaction_id, original_transaction_id, user_id, product_id, environment, signed_transaction_info, games, now_iso, now_iso),
+            )
+
+            snapshot = self._read_snapshot(conn, user_id, current_time)
+            self._commit(conn)
+            return PurchaseResult(applied=True, revoked=False, already_processed=False, games_changed=games, snapshot=snapshot)
+
+    def renew_subscription(
+        self,
+        user_id: int,
+        original_transaction_id: str,
+        transaction_id: str,
+        product_id: str,
+        environment: str,
+        signed_transaction_info: str,
+        now: Optional[datetime] = None,
+    ) -> PurchaseResult:
+        """Handle subscription renewal (DID_RENEW webhook)."""
+        current_time = now or utc_now()
+        now_iso = _isoformat(current_time)
+        period_end = current_time + timedelta(days=31)
+        period_end_iso = _isoformat(period_end)
+        games = _subscription_games_per_month()
+        expires_at = current_time + timedelta(days=31 * (1 + SUBSCRIPTION_ROLLOVER_MONTHS))
+        expires_iso = _isoformat(expires_at)
+
+        with self._connection(write=True) as conn:
+            self._lock_entitlement(conn, user_id, current_time)
+
+            # Idempotency on transaction_id
+            existing_txn = self._fetchone(conn, "SELECT * FROM app_store_transactions WHERE transaction_id = ?", (transaction_id,))
+            if existing_txn:
+                snapshot = self._read_snapshot(conn, user_id, current_time)
+                self._commit(conn)
+                return PurchaseResult(applied=False, revoked=False, already_processed=True, games_changed=0, snapshot=snapshot)
+
+            # Update subscription period
+            self._execute(
+                conn,
+                """
+                UPDATE subscriptions SET status = 'active', current_period_start = ?, current_period_end = ?, auto_renew_enabled = 1, updated_at = ?
+                WHERE original_transaction_id = ? AND user_id = ?
+                """,
+                (now_iso, period_end_iso, now_iso, original_transaction_id, user_id),
+            )
+
+            sub_row = self._fetchone(conn, "SELECT id FROM subscriptions WHERE original_transaction_id = ?", (original_transaction_id,))
+            if not sub_row:
+                snapshot = self._read_snapshot(conn, user_id, current_time)
+                self._commit(conn)
+                return PurchaseResult(applied=False, revoked=False, already_processed=False, games_changed=0, snapshot=snapshot)
+            sub_id = int(sub_row["id"])
+
+            # Grant new credits
+            self._execute(
+                conn,
+                """
+                INSERT INTO subscription_game_credits (user_id, subscription_id, credits_granted, credits_remaining, period_start, expires_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, sub_id, games, games, now_iso, expires_iso, now_iso),
+            )
+
+            # Record transaction
+            self._execute(
+                conn,
+                """
+                INSERT INTO app_store_transactions (transaction_id, original_transaction_id, user_id, product_id, environment, signed_transaction_info, status, games_granted, notification_type, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'subscription', ?, 'DID_RENEW', ?, ?)
+                """,
+                (transaction_id, original_transaction_id, user_id, product_id, environment, signed_transaction_info, games, now_iso, now_iso),
+            )
+
+            snapshot = self._read_snapshot(conn, user_id, current_time)
+            self._commit(conn)
+            return PurchaseResult(applied=True, revoked=False, already_processed=False, games_changed=games, snapshot=snapshot)
+
+    def expire_subscription(self, user_id: int, original_transaction_id: str, now: Optional[datetime] = None) -> None:
+        """Mark a subscription as expired."""
+        current_time = now or utc_now()
+        now_iso = _isoformat(current_time)
+        with self._connection(write=True) as conn:
+            self._execute(
+                conn,
+                "UPDATE subscriptions SET status = 'expired', auto_renew_enabled = 0, updated_at = ? WHERE original_transaction_id = ? AND user_id = ?",
+                (now_iso, original_transaction_id, user_id),
+            )
+            self._commit(conn)
+
+    def update_subscription_status(self, user_id: int, original_transaction_id: str, status: str, now: Optional[datetime] = None) -> None:
+        current_time = now or utc_now()
+        now_iso = _isoformat(current_time)
+        with self._connection(write=True) as conn:
+            self._execute(
+                conn,
+                "UPDATE subscriptions SET status = ?, updated_at = ? WHERE original_transaction_id = ? AND user_id = ?",
+                (status, now_iso, original_transaction_id, user_id),
+            )
+            self._commit(conn)
+
+    def update_subscription_auto_renew(self, user_id: int, original_transaction_id: str, auto_renew: bool, now: Optional[datetime] = None) -> None:
+        current_time = now or utc_now()
+        now_iso = _isoformat(current_time)
+        with self._connection(write=True) as conn:
+            self._execute(
+                conn,
+                "UPDATE subscriptions SET auto_renew_enabled = ?, updated_at = ? WHERE original_transaction_id = ? AND user_id = ?",
+                (1 if auto_renew else 0, now_iso, original_transaction_id, user_id),
+            )
+            self._commit(conn)

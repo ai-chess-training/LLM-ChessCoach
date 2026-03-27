@@ -43,7 +43,24 @@ def _expected_bundle_id() -> str:
     return "com.llmchesscoach.dev"
 
 
+def _expected_product_ids() -> set:
+    """Return all known App Store product IDs (consumable + subscription)."""
+    ids = set()
+    consumable = os.getenv("APPSTORE_PRODUCT_ID_30_GAMES", "").strip()
+    subscription = os.getenv("APPSTORE_PRODUCT_ID_SUBSCRIPTION", "").strip()
+    if consumable:
+        ids.add(consumable)
+    if subscription:
+        ids.add(subscription)
+    if ids:
+        return ids
+    if _is_production():
+        raise AppStoreVerificationError("No App Store product IDs configured")
+    return {"com.llmchesscoach.games30", "com.llmchesscoach.monthly100"}
+
+
 def _expected_product_id() -> str:
+    """Return the consumable product ID (backward compat)."""
     product_id = os.getenv("APPSTORE_PRODUCT_ID_30_GAMES", "").strip()
     if product_id:
         return product_id
@@ -87,7 +104,7 @@ def _normalize_transaction(payload: Any, signed_transaction_info: str) -> Verifi
 
     if not transaction_id:
         raise AppStoreVerificationError("App Store transaction is missing transactionId")
-    if product_id != _expected_product_id():
+    if product_id not in _expected_product_ids():
         raise AppStoreVerificationError("Unexpected App Store productId")
     if bundle_id != _expected_bundle_id():
         raise AppStoreVerificationError("Unexpected App Store bundleId")

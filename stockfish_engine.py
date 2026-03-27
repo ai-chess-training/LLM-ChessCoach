@@ -3,25 +3,28 @@
 import chess
 import chess.engine
 import chess.pgn
+import logging
 import os
 import io
 from typing import Dict, List, Optional, Any
 
+from config import (
+    DEFAULT_MULTIPV,
+    DEFAULT_NODES_PER_PV,
+    SKILL_LEVEL_MAPPINGS,
+    WIN_PERCENTAGE_SCALING,
+    ACCURACY_BASE,
+    ACCURACY_EXPONENT,
+    ACCURACY_OFFSET,
+)
+
+logger = logging.getLogger(__name__)
+
 # Set STOCKFISH_PATH from environment or default path
 STOCKFISH_PATH = os.getenv('STOCKFISH_PATH', 'stockfish')
 
-# Defaults for MVP
-DEFAULT_MULTIPV = int(os.getenv('MULTIPV', '5'))
-DEFAULT_NODES_PER_PV = int(os.getenv('NODES_PER_PV', '1000000'))
-
-# Skill level mappings for different player levels
-SKILL_LEVEL_MAPPINGS = {
-    "beginner": {"skill_level": 1, "move_time_ms": 100},
-    "adv_beginner" : {"skill_level": 2, "move_time_ms": 100},
-    "intermediate": {"skill_level": 3, "move_time_ms": 100},
-    "advanced": {"skill_level": 4, "move_time_ms": 100},
-    "expert": {"skill_level": 6, "move_time_ms": 100}
-}
+# Re-export for backward compatibility
+# Canonical definitions are in config.py
 
 class StockfishAnalyzer:
     """Enhanced Stockfish analyzer for detailed position analysis (MultiPV support)."""
@@ -173,7 +176,7 @@ class StockfishAnalyzer:
             }
             
         except Exception as e:
-            print(f"Error analyzing position: {e}")
+            logger.error("Error analyzing position: %s", e)
             return {
                 'score': {'cp': 0},
                 'best_move': None,
@@ -243,7 +246,7 @@ class StockfishAnalyzer:
             }
 
         except Exception as e:
-            print(f"Error getting engine move: {e}")
+            logger.error("Error getting engine move: %s", e)
             return {
                 'move_uci': None,
                 'move_san': None,
@@ -371,7 +374,7 @@ def evaluate_game_detailed(pgn_content: str, depth: int = 15,
     try:
         game = chess.pgn.read_game(io.StringIO(pgn_content))
     except Exception as e:
-        print(f"Error parsing PGN in evaluate_game_detailed: {e}")
+        logger.error("Error parsing PGN in evaluate_game_detailed: %s", e)
         return {}
     
     if not game:
@@ -380,7 +383,7 @@ def evaluate_game_detailed(pgn_content: str, depth: int = 15,
     # Validate the game has moves
     move_list = list(game.mainline_moves())
     if not move_list:
-        print("Warning: Game has no valid moves for analysis")
+        logger.warning("Game has no valid moves for analysis")
         return {}
     
     analysis = {}
@@ -398,7 +401,7 @@ def evaluate_game_detailed(pgn_content: str, depth: int = 15,
                 
                 # Validate move is legal
                 if move not in board.legal_moves:
-                    print(f"Warning: Skipping illegal move at position {move_num}")
+                    logger.warning("Skipping illegal move at position %d", move_num)
                     move_num += 1
                     continue
                 
@@ -417,7 +420,7 @@ def evaluate_game_detailed(pgn_content: str, depth: int = 15,
             analysis[move_num] = final_eval
     
     except Exception as e:
-        print(f"Error during Stockfish analysis: {e}")
+        logger.error("Error during Stockfish analysis: %s", e)
         # Return what we have so far
         pass
     
@@ -440,11 +443,11 @@ def analyze_multiple_games(pgn_files: List[str], depth: int = 15) -> Dict[str, L
     for pgn_file in pgn_files:
         try:
             filename = os.path.basename(pgn_file)
-            print(f"Analyzing {filename}...")
+            logger.info("Analyzing %s...", filename)
             analysis = evaluate_game(pgn_file, depth)
             results[filename] = analysis
         except Exception as e:
-            print(f"Error analyzing {pgn_file}: {e}")
+            logger.error("Error analyzing %s: %s", pgn_file, e)
             results[os.path.basename(pgn_file)] = []
     
     return results
@@ -494,15 +497,15 @@ def get_game_statistics(analysis: List[Dict[str, Any]]) -> Dict[str, Any]:
             if is_best:
                 black_best_moves += 1
     
-    def calculate_accuracy( evals_before, evals_after):
+    def calculate_accuracy(evals_before, evals_after):
         """Calculate accuracy percentage based on centipawn losses."""
         import math
-        win_percentages_before = [(50 + 50 * (2 / (1 + math.exp(-0.00368208 * eval)) - 1)) for eval in evals_before]
-        win_percentages_after = [(50 + 50 * (2 / (1 + math.exp(-0.00368208 * eval) ) - 1)) for eval in evals_after]
-        
+        win_percentages_before = [(50 + 50 * (2 / (1 + math.exp(-WIN_PERCENTAGE_SCALING * ev)) - 1)) for ev in evals_before]
+        win_percentages_after = [(50 + 50 * (2 / (1 + math.exp(-WIN_PERCENTAGE_SCALING * ev)) - 1)) for ev in evals_after]
+
         def accuracy(win_after, win_before):
-            return 103.1668 * math.exp(-0.04354 * (win_before - win_after)) - 3.1669
-        
+            return ACCURACY_BASE * math.exp(ACCURACY_EXPONENT * (win_before - win_after)) + ACCURACY_OFFSET
+
         accuracy_per_move = [accuracy(wb, wa) for wb, wa in zip(win_percentages_before, win_percentages_after)]
 
         return accuracy_per_move
