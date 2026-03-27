@@ -17,13 +17,15 @@ try:
 except ImportError:
     REDIS_AVAILABLE = False
 
-from stockfish_engine import StockfishAnalyzer, DEFAULT_MULTIPV, DEFAULT_NODES_PER_PV, SKILL_LEVEL_MAPPINGS
-from llm_coach import coach_move_with_llm, severity_from_cp_loss
+from config import DEFAULT_MULTIPV, DEFAULT_NODES_PER_PV, SKILL_LEVEL_MAPPINGS, SESSION_TTL_SECONDS
+from stockfish_engine import StockfishAnalyzer
+from move_analysis import build_move_feedback, severity_from_cp_loss
+from llm_coach import coach_move_with_llm
 
 logger = logging.getLogger(__name__)
 
-# Session TTL in seconds (24 hours)
-SESSION_TTL = 24 * 60 * 60
+# Session TTL re-exported for backward compat
+SESSION_TTL = SESSION_TTL_SECONDS
 
 
 class SessionManager:
@@ -39,14 +41,12 @@ class SessionManager:
     ) -> Dict[str, Any]:
         sid = str(uuid.uuid4())
         board = chess.Board(start_fen) if start_fen else chess.Board()
-
-        # Map skill level to Stockfish configuration
         skill_config = SKILL_LEVEL_MAPPINGS.get(skill_level, SKILL_LEVEL_MAPPINGS["intermediate"])
 
         sess = {
             "id": sid,
             "skill_level": skill_level,
-            "game_mode": game_mode,  # "play" for interactive play, "training" for analysis only
+            "game_mode": game_mode,
             "engine_skill_level": skill_config["skill_level"],
             "engine_time_ms": skill_config["move_time_ms"],
             "owner_user_id": owner_user_id,
@@ -54,14 +54,14 @@ class SessionManager:
             "game_charge_event_key": None,
             "created_at": time.time(),
             "board": board,
-            "moves": [],  # list of move feedback dicts
+            "moves": [],
         }
         self.sessions[sid] = sess
         return {
             "session_id": sid,
             "fen_start": board.fen(),
             "game_mode": game_mode,
-            "skill_level": skill_level
+            "skill_level": skill_level,
         }
 
     def get(self, sid: str) -> Dict[str, Any]:
@@ -75,7 +75,7 @@ class SessionManager:
             raise KeyError("Session id missing")
         self.sessions[sid] = sess
 
-    def _get_engine_move(self, sess: Dict[str, Any]) -> Dict[str, Any]:
+    def _get_engine_move(self, sess: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Get engine move for the current position."""
         board: chess.Board = sess["board"]
         skill_level = sess.get("engine_skill_level", 8)
@@ -85,21 +85,17 @@ class SessionManager:
             engine_response = analyzer.get_engine_move(board, time_limit_ms=time_ms)
 
         if engine_response.get("move_uci"):
-            # Parse the move
             move = chess.Move.from_uci(engine_response["move_uci"])
-            # Apply the move to the board
             board.push(move)
-
             return {
                 "san": engine_response.get("move_san"),
                 "uci": engine_response.get("move_uci"),
                 "fen_after": board.fen(),
-                "score": engine_response.get("score", {})
+                "score": engine_response.get("score", {}),
             }
         return None
 
     def _parse_move(self, board: chess.Board, move_str: str) -> Tuple[Optional[chess.Move], Optional[str], Optional[str]]:
-        # Try UCI first then SAN
         move = None
         san = None
         uci = None
@@ -108,12 +104,12 @@ class SessionManager:
                 m = chess.Move.from_uci(move_str)
                 if m in board.legal_moves:
                     move = m
-        except Exception:
+        except (ValueError, chess.InvalidMoveError):
             pass
         if move is None:
             try:
                 move = board.parse_san(move_str)
-            except Exception:
+            except (ValueError, chess.InvalidMoveError):
                 return None, None, None
         try:
             san = board.san(move)
@@ -132,92 +128,79 @@ class SessionManager:
         fen_before = board.fen()
         move_no = len(sess["moves"]) + 1
         side = "white" if board.turn else "black"
+        mover_is_white = (side == "white")
 
-        # Analyze move with MultiPV
         with StockfishAnalyzer(multipv=DEFAULT_MULTIPV, nodes_per_pv=DEFAULT_NODES_PER_PV) as analyzer:
             eval_before = analyzer.analyze_position(board)
             comparison = analyzer.compare_move(board, move)
 
-        # Push the move now
         board.push(move)
         fen_after = board.fen()
 
-        # Derive mover-perspective cp_before/after
-        before_cp_white = eval_before.get("score", {}).get("cp")
-        eval_after = comparison.get("eval_after", {})
-        after_cp_white = eval_after.get("score", {}).get("cp")
-        mover_is_white = (side == "white")
-        cp_before = None
-        cp_after = None
-        if before_cp_white is not None and after_cp_white is not None:
-            cp_before = before_cp_white if mover_is_white else -before_cp_white
-            cp_after = after_cp_white if mover_is_white else -after_cp_white
+        feedback = build_move_feedback(
+            move_no=move_no, side=side, san=san, uci=uci,
+            fen_before=fen_before, fen_after=fen_after,
+            eval_before=eval_before, comparison=comparison,
+            mover_is_white=mover_is_white,
+        )
 
-        cp_loss = comparison.get("eval_loss", 0.0)  # already in pawns, mover perspective
-        best_move_san = eval_before.get("best_move_san")
-
-        # Build multipv entries
-        multipv_raw: List[Dict[str, Any]] = eval_before.get("pv", [])
-        multipv = []
-        for e in multipv_raw:
-            multipv.append(
-                {
-                    "move_san": e.get("move_san"),
-                    "move_uci": e.get("move_uci"),
-                    "cp": e.get("cp"),
-                    "mate": e.get("mate"),
-                    "line_san": e.get("line_san", [])[:10],
-                }
-            )
-
-        feedback = {
-            "move_no": move_no,
-            "side": side,
-            "san": san,
-            "uci": uci,
-            "fen_before": fen_before,
-            "fen_after": fen_after,
-            "cp_before": cp_before,
-            "cp_after": cp_after,
-            "cp_loss": cp_loss,
-            "severity": severity_from_cp_loss(cp_loss),
-            "best_move_san": best_move_san,
-            "multipv": multipv,
-        }
-
-        # Coach via LLM (with rule-based fallback)
         level = sess.get("skill_level", "intermediate")
         coach = await coach_move_with_llm(feedback, level=level)
-        feedback.update(
-            {
-                "basic": coach.get("basic"),
-                "source": coach.get("source", "rules"),
-            }
-        )
+        feedback["basic"] = coach.get("basic")
+        feedback["source"] = coach.get("source", "rules")
 
         sess["moves"].append(feedback)
 
-        # Get engine move if in play mode
         engine_move = None
         if sess.get("game_mode") == "play" and not board.is_game_over():
             engine_move = self._get_engine_move(sess)
             if engine_move:
-                # Store engine move in session history
-                engine_feedback = {
+                sess["moves"].append({
                     "move_no": len(sess["moves"]),
-                    "side": "white" if board.turn == chess.BLACK else "black",  # After engine move
+                    "side": "white" if board.turn == chess.BLACK else "black",
                     "san": engine_move["san"],
                     "uci": engine_move["uci"],
                     "fen_after": engine_move["fen_after"],
-                    "is_engine_move": True
-                }
-                sess["moves"].append(engine_feedback)
+                    "is_engine_move": True,
+                })
 
+        self.save(sess)
         return {
             "legal": True,
             "human_feedback": feedback,
-            "engine_move": engine_move
+            "engine_move": engine_move,
         }
+
+    def undo_last_move(self, sid: str) -> Dict[str, Any]:
+        """Pop the last move(s) from the session.
+
+        In play mode, pops both engine response and human move.
+        Does NOT refund game credits.
+        """
+        sess = self.get(sid)
+        board: chess.Board = sess["board"]
+        moves: list = sess["moves"]
+
+        if not moves:
+            raise ValueError("No moves to undo")
+
+        undone = 0
+        # In play mode the last entry may be an engine move
+        if moves and moves[-1].get("is_engine_move"):
+            moves.pop()
+            board.pop()
+            undone += 1
+
+        # Undo the human move
+        if moves:
+            moves.pop()
+            board.pop()
+            undone += 1
+
+        self.save(sess)
+        snapshot = self.snapshot(sid)
+        snapshot["undone_count"] = undone
+        return snapshot
 
     def snapshot(self, sid: str) -> Dict[str, Any]:
         sess = self.get(sid)
@@ -229,59 +212,67 @@ class SessionManager:
             "fen": board.fen(),
             "moves": sess.get("moves", []),
             "is_game_over": board.is_game_over(),
-            "turn": "white" if board.turn else "black"
+            "turn": "white" if board.turn else "black",
         }
 
 
 class RedisSessionManager(SessionManager):
-    """
-    Redis-backed session manager with sliding TTL.
-    Sessions are stored in Redis and automatically expire 24 hours after last access.
+    """Redis-backed session manager with sliding TTL.
+
+    Sessions are stored in Redis and automatically expire after SESSION_TTL.
+    Board state is serialized as FEN + move UCIs so that board.pop() works
+    correctly for the undo feature.
     """
 
     def __init__(self, redis_url: str):
-        # Don't call super().__init__() - we don't want the in-memory dict
         try:
             self.redis_client = redis.from_url(
                 redis_url,
                 decode_responses=True,
                 socket_connect_timeout=5,
-                socket_timeout=5
+                socket_timeout=5,
             )
-            # Test connection
             self.redis_client.ping()
-            logger.info(f"Connected to Redis at {redis_url}")
+            logger.info("Connected to Redis at %s", redis_url)
         except Exception as e:
-            logger.error(f"Failed to connect to Redis: {e}")
+            logger.error("Failed to connect to Redis: %s", e)
             raise
 
     def _session_key(self, sid: str) -> str:
-        """Generate Redis key for session."""
         return f"session:{sid}"
 
     def _serialize_session(self, sess: Dict[str, Any]) -> str:
-        """Serialize session to JSON, converting Board to FEN."""
+        """Serialize session to JSON, converting Board to FEN + move stack."""
         serializable = sess.copy()
         if "board" in serializable:
             board: chess.Board = serializable["board"]
             serializable["board_fen"] = board.fen()
+            # Persist the full move stack so board.pop() works after deserialization
+            serializable["board_move_ucis"] = [m.uci() for m in board.move_stack]
             del serializable["board"]
         return json.dumps(serializable)
 
     def _deserialize_session(self, data: str) -> Dict[str, Any]:
-        """Deserialize session from JSON, converting FEN back to Board."""
+        """Deserialize session from JSON, rebuilding the Board with full move stack."""
         sess = json.loads(data)
         if "board_fen" in sess:
-            sess["board"] = chess.Board(sess["board_fen"])
+            move_ucis = sess.pop("board_move_ucis", [])
+            # Rebuild board from initial position + replayed moves so pop() works
+            if move_ucis:
+                board = chess.Board()
+                for uci_str in move_ucis:
+                    board.push(chess.Move.from_uci(uci_str))
+            else:
+                board = chess.Board(sess["board_fen"])
             del sess["board_fen"]
+            sess["board"] = board
         return sess
 
     def _refresh_ttl(self, sid: str) -> None:
-        """Refresh session TTL to 24 hours (sliding window)."""
         try:
             self.redis_client.expire(self._session_key(sid), SESSION_TTL)
         except Exception as e:
-            logger.error(f"Failed to refresh TTL for session {sid}: {e}")
+            logger.error("Failed to refresh TTL for session %s: %s", sid, e)
             raise
 
     def create(
@@ -291,11 +282,8 @@ class RedisSessionManager(SessionManager):
         start_fen: Optional[str] = None,
         owner_user_id: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Create a new session in Redis with 24h TTL."""
         sid = str(uuid.uuid4())
         board = chess.Board(start_fen) if start_fen else chess.Board()
-
-        # Map skill level to Stockfish configuration
         skill_config = SKILL_LEVEL_MAPPINGS.get(skill_level, SKILL_LEVEL_MAPPINGS["intermediate"])
 
         sess = {
@@ -313,167 +301,32 @@ class RedisSessionManager(SessionManager):
         }
 
         try:
-            # Store in Redis with 24h TTL
             serialized = self._serialize_session(sess)
             self.redis_client.setex(self._session_key(sid), SESSION_TTL, serialized)
-            logger.info(f"Created session {sid} with {SESSION_TTL}s TTL")
+            logger.info("Created session %s with %ds TTL", sid, SESSION_TTL)
         except Exception as e:
-            logger.error(f"Failed to create session in Redis: {e}")
+            logger.error("Failed to create session in Redis: %s", e)
             raise
 
         return {
             "session_id": sid,
             "fen_start": board.fen(),
             "game_mode": game_mode,
-            "skill_level": skill_level
+            "skill_level": skill_level,
         }
 
     def get(self, sid: str) -> Dict[str, Any]:
-        """Retrieve session from Redis and refresh TTL."""
         try:
             data = self.redis_client.get(self._session_key(sid))
             if data is None:
                 raise KeyError("Session not found")
-
-            # Deserialize session
             sess = self._deserialize_session(data)
-
-            # Refresh TTL (sliding window)
             self._refresh_ttl(sid)
-
             return sess
         except redis.RedisError as e:
-            logger.error(f"Redis error retrieving session {sid}: {e}")
+            logger.error("Redis error retrieving session %s: %s", sid, e)
             raise
         except KeyError:
-            raise
-        except Exception as e:
-            logger.error(f"Error retrieving session {sid}: {e}")
-            raise
-
-    async def apply_move(self, sid: str, move_str: str) -> Dict[str, Any]:
-        """Apply move to session and update Redis with refreshed TTL."""
-        # Get session (this also refreshes TTL)
-        sess = self.get(sid)
-        board: chess.Board = sess["board"]
-        move, san, uci = self._parse_move(board, move_str)
-        if move is None or move not in board.legal_moves:
-            return {"legal": False, "error": "Illegal move"}
-
-        fen_before = board.fen()
-        move_no = len(sess["moves"]) + 1
-        side = "white" if board.turn else "black"
-
-        # Analyze move with MultiPV
-        with StockfishAnalyzer(multipv=DEFAULT_MULTIPV, nodes_per_pv=DEFAULT_NODES_PER_PV) as analyzer:
-            eval_before = analyzer.analyze_position(board)
-            comparison = analyzer.compare_move(board, move)
-
-        # Push the move now
-        board.push(move)
-        fen_after = board.fen()
-
-        # Derive mover-perspective cp_before/after
-        before_cp_white = eval_before.get("score", {}).get("cp")
-        eval_after = comparison.get("eval_after", {})
-        after_cp_white = eval_after.get("score", {}).get("cp")
-        mover_is_white = (side == "white")
-        cp_before = None
-        cp_after = None
-        if before_cp_white is not None and after_cp_white is not None:
-            cp_before = before_cp_white if mover_is_white else -before_cp_white
-            cp_after = after_cp_white if mover_is_white else -after_cp_white
-
-        cp_loss = comparison.get("eval_loss", 0.0)
-        best_move_san = eval_before.get("best_move_san")
-
-        # Build multipv entries
-        multipv_raw: List[Dict[str, Any]] = eval_before.get("pv", [])
-        multipv = []
-        for e in multipv_raw:
-            multipv.append(
-                {
-                    "move_san": e.get("move_san"),
-                    "move_uci": e.get("move_uci"),
-                    "cp": e.get("cp"),
-                    "mate": e.get("mate"),
-                    "line_san": e.get("line_san", [])[:10],
-                }
-            )
-
-        feedback = {
-            "move_no": move_no,
-            "side": side,
-            "san": san,
-            "uci": uci,
-            "fen_before": fen_before,
-            "fen_after": fen_after,
-            "cp_before": cp_before,
-            "cp_after": cp_after,
-            "cp_loss": cp_loss,
-            "severity": severity_from_cp_loss(cp_loss),
-            "best_move_san": best_move_san,
-            "multipv": multipv,
-        }
-
-        # Coach via LLM (with rule-based fallback)
-        level = sess.get("skill_level", "intermediate")
-        coach = await coach_move_with_llm(feedback, level=level)
-        feedback.update(
-            {
-                "basic": coach.get("basic"),
-                "source": coach.get("source", "rules"),
-            }
-        )
-
-        sess["moves"].append(feedback)
-
-        # Get engine move if in play mode
-        engine_move = None
-        if sess.get("game_mode") == "play" and not board.is_game_over():
-            engine_move = self._get_engine_move(sess)
-            if engine_move:
-                # Store engine move in session history
-                engine_feedback = {
-                    "move_no": len(sess["moves"]),
-                    "side": "white" if board.turn == chess.BLACK else "black",
-                    "san": engine_move["san"],
-                    "uci": engine_move["uci"],
-                    "fen_after": engine_move["fen_after"],
-                    "is_engine_move": True
-                }
-                sess["moves"].append(engine_feedback)
-
-        # Update session in Redis with refreshed TTL
-        try:
-            serialized = self._serialize_session(sess)
-            self.redis_client.setex(self._session_key(sid), SESSION_TTL, serialized)
-            logger.debug(f"Updated session {sid} and refreshed TTL")
-        except Exception as e:
-            logger.error(f"Failed to update session {sid} in Redis: {e}")
-            raise
-
-        return {
-            "legal": True,
-            "human_feedback": feedback,
-            "engine_move": engine_move
-        }
-
-    def delete(self, sid: str) -> bool:
-        """Explicitly delete a session from Redis."""
-        try:
-            result = self.redis_client.delete(self._session_key(sid))
-            return result > 0
-        except Exception as e:
-            logger.error(f"Failed to delete session {sid}: {e}")
-            raise
-
-    def exists(self, sid: str) -> bool:
-        """Check if session exists in Redis."""
-        try:
-            return self.redis_client.exists(self._session_key(sid)) > 0
-        except Exception as e:
-            logger.error(f"Failed to check session {sid} existence: {e}")
             raise
 
     def save(self, sess: Dict[str, Any]) -> None:
@@ -484,15 +337,31 @@ class RedisSessionManager(SessionManager):
             serialized = self._serialize_session(sess)
             self.redis_client.setex(self._session_key(sid), SESSION_TTL, serialized)
         except Exception as e:
-            logger.error(f"Failed to save session {sid}: {e}")
+            logger.error("Failed to save session %s: %s", sid, e)
+            raise
+
+    async def apply_move(self, sid: str, move_str: str) -> Dict[str, Any]:
+        """Apply move and persist updated session to Redis."""
+        return await super().apply_move(sid, move_str)
+
+    def delete(self, sid: str) -> bool:
+        try:
+            result = self.redis_client.delete(self._session_key(sid))
+            return result > 0
+        except Exception as e:
+            logger.error("Failed to delete session %s: %s", sid, e)
+            raise
+
+    def exists(self, sid: str) -> bool:
+        try:
+            return self.redis_client.exists(self._session_key(sid)) > 0
+        except Exception as e:
+            logger.error("Failed to check session %s existence: %s", sid, e)
             raise
 
 
 def _create_session_manager() -> SessionManager:
-    """
-    Factory function to create appropriate session manager.
-    Uses Redis if REDIS_URL is set, otherwise falls back to in-memory.
-    """
+    """Factory: Redis if REDIS_URL is set, otherwise in-memory."""
     redis_url = os.getenv("REDIS_URL")
 
     if redis_url and REDIS_AVAILABLE:
@@ -500,16 +369,14 @@ def _create_session_manager() -> SessionManager:
             logger.info("Initializing Redis session storage for multi-worker support")
             return RedisSessionManager(redis_url)
         except Exception as e:
-            logger.warning(f"Failed to initialize Redis session storage: {e}")
+            logger.warning("Failed to initialize Redis session storage: %s", e)
             logger.warning("Falling back to in-memory session storage (NOT suitable for multi-worker)")
             return SessionManager()
     else:
         if not redis_url:
             logger.warning("REDIS_URL not set - using in-memory session storage")
-            logger.warning("This is NOT suitable for multi-worker deployments")
         elif not REDIS_AVAILABLE:
             logger.warning("Redis library not available - install with: pip install redis hiredis")
-            logger.warning("Falling back to in-memory session storage")
         return SessionManager()
 
 

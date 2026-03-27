@@ -93,6 +93,23 @@ class EntitlementStatus(BaseModel):
     paid_games_balance: int
     total_available_games: int
     can_play: bool
+    # Subscription fields (additive, backward-compatible defaults)
+    subscription_active: bool = False
+    subscription_product_id: Optional[str] = None
+    subscription_period_end: Optional[str] = None
+    subscription_auto_renew: bool = False
+    subscription_games_remaining: int = 0
+
+
+class UndoResponse(BaseModel):
+    session_id: str
+    skill_level: SkillLevel
+    game_mode: GameMode
+    fen: str
+    moves: List[MoveFeedback] = Field(default_factory=list)
+    is_game_over: bool = False
+    turn: Literal["white", "black"]
+    undone_count: int = 0
 
 
 class AppleAuthRequest(BaseModel):
